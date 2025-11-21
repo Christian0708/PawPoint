@@ -1,5 +1,6 @@
 import time
 import math
+import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 from enum import Enum, auto
@@ -57,6 +58,41 @@ class StorageVirtualNode:
         
         # Network connections (node_id: bandwidth_available)
         self.connections: Dict[str, int] = {}
+        
+        # Create storage directory structure
+        self.create_storage_structure()
+
+    def create_storage_structure(self):
+        """Create directory structure for node storage on the host machine"""
+        # Define storage paths
+        base_path = os.path.join("storage", self.node_id)
+        chunks_path = os.path.join(base_path, "chunks")
+        
+        # Create directories if they don't exist
+        os.makedirs(chunks_path, exist_ok=True)
+        
+        # Store paths as instance variables for later use
+        self.storage_path = base_path
+        self.chunks_path = chunks_path
+        
+        print(f"[{self.node_id}] Created storage structure at {base_path}")
+
+    def write_chunk_to_disk(self, file_id: str, chunk_id: int, data: bytes) -> bool:
+        """Write a chunk to disk as a binary file"""
+        try:
+            # Create filename for this chunk
+            chunk_filename = f"{file_id}_chunk_{chunk_id}.bin"
+            chunk_path = os.path.join(self.chunks_path, chunk_filename)
+            
+            # Write chunk data to disk
+            with open(chunk_path, 'wb') as f:
+                f.write(data)
+            
+            print(f"[{self.node_id}] Wrote chunk {chunk_id} to {chunk_filename} ({len(data)} bytes)")
+            return True
+        except Exception as e:
+            print(f"[{self.node_id}] Error writing chunk {chunk_id}: {e}")
+            return False
 
     def add_connection(self, node_id: str, bandwidth: int):
         """Add a network connection to another node"""
@@ -144,6 +180,13 @@ class StorageVirtualNode:
         # Calculate transfer time (in seconds)
         transfer_time = chunk_size_bits / available_bandwidth
         time.sleep(transfer_time)  # Simulate transfer delay
+        
+        # Generate simulated chunk data (in real system, this would come from network)
+        chunk_data = os.urandom(chunk.size)  # Random bytes to simulate file data
+        
+        # Write chunk to disk
+        if not self.write_chunk_to_disk(file_id, chunk_id, chunk_data):
+            return False
         
         # Update chunk status
         chunk.status = TransferStatus.COMPLETED
