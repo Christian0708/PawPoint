@@ -77,25 +77,28 @@ class StorageVirtualNode:
         
         print(f"[{self.node_id}] Created storage structure at {base_path}")
 
-    def write_chunk_to_disk(self, file_id: str, chunk_id: int, data: bytes) -> bool:
-        """Write a chunk to disk as a binary file"""
+    def write_chunk_to_disk(self, file_id: str, chunk_id: int, data: bytes) -> tuple[bool, str]:
+        """Write a chunk to disk as a binary file and return checksum"""
         try:
             # Create filename for this chunk
             chunk_filename = f"{file_id}_chunk_{chunk_id}.bin"
             chunk_path = os.path.join(self.chunks_path, chunk_filename)
             
+            # Calculate real MD5 checksum from actual data
+            checksum = hashlib.md5(data).hexdigest()
+            
             # Write chunk data to disk
             with open(chunk_path, 'wb') as f:
                 f.write(data)
             
-            print(f"[{self.node_id}] Wrote chunk {chunk_id} to {chunk_filename} ({len(data)} bytes)")
-            return True
+            print(f"[{self.node_id}] Wrote chunk {chunk_id} to {chunk_filename} ({len(data)} bytes, checksum: {checksum[:8]}...)")
+            return True, checksum
         except Exception as e:
             print(f"[{self.node_id}] Error writing chunk {chunk_id}: {e}")
-            return False
+            return False, ""
 
-    def read_chunk_from_disk(self, file_id: str, chunk_id: int) -> Optional[bytes]:
-        """Read a chunk from disk"""
+    def read_chunk_from_disk(self, file_id: str, chunk_id: int, expected_checksum: Optional[str] = None) -> Optional[bytes]:
+        """Read a chunk from disk and verify checksum if provided"""
         try:
             # Create filename for this chunk
             chunk_filename = f"{file_id}_chunk_{chunk_id}.bin"
@@ -110,7 +113,16 @@ class StorageVirtualNode:
             with open(chunk_path, 'rb') as f:
                 data = f.read()
             
-            print(f"[{self.node_id}] Read chunk {chunk_id} from {chunk_filename} ({len(data)} bytes)")
+            # Verify checksum if provided
+            if expected_checksum:
+                actual_checksum = hashlib.md5(data).hexdigest()
+                if actual_checksum != expected_checksum:
+                    print(f"[{self.node_id}] Checksum mismatch for chunk {chunk_id}! Expected: {expected_checksum[:8]}..., Got: {actual_checksum[:8]}...")
+                    return None
+                print(f"[{self.node_id}] Read chunk {chunk_id} from {chunk_filename} ({len(data)} bytes, checksum verified)")
+            else:
+                print(f"[{self.node_id}] Read chunk {chunk_id} from {chunk_filename} ({len(data)} bytes)")
+            
             return data
         except Exception as e:
             print(f"[{self.node_id}] Error reading chunk {chunk_id}: {e}")
@@ -137,13 +149,13 @@ class StorageVirtualNode:
         
         chunks = []
         for i in range(num_chunks):
-            # In a real system, we'd compute actual checksums
-            fake_checksum = hashlib.md5(f"{file_id}-{i}".encode()).hexdigest()
+            # Checksum will be computed when actual data is written
+            # Initialize with empty string for now
             actual_chunk_size = min(chunk_size, file_size - i * chunk_size)
             chunks.append(FileChunk(
                 chunk_id=i,
                 size=actual_chunk_size,
-                checksum=fake_checksum
+                checksum=""  # Will be computed from actual data
             ))
         
         return chunks
@@ -206,11 +218,13 @@ class StorageVirtualNode:
         # Generate simulated chunk data (in real system, this would come from network)
         chunk_data = os.urandom(chunk.size)  # Random bytes to simulate file data
         
-        # Write chunk to disk
-        if not self.write_chunk_to_disk(file_id, chunk_id, chunk_data):
+        # Write chunk to disk and get real checksum
+        success, checksum = self.write_chunk_to_disk(file_id, chunk_id, chunk_data)
+        if not success:
             return False
         
-        # Update chunk status
+        # Update chunk with real checksum and status
+        chunk.checksum = checksum
         chunk.status = TransferStatus.COMPLETED
         chunk.stored_node = self.node_id
         
@@ -241,10 +255,10 @@ class StorageVirtualNode:
         
         file_transfer = self.stored_files[file_id]
         
-        # Verify all chunks can be read from disk
+        # Verify all chunks can be read from disk and checksums match
         print(f"[{self.node_id}] Retrieving file {file_transfer.file_name} ({len(file_transfer.chunks)} chunks)")
         for chunk in file_transfer.chunks:
-            chunk_data = self.read_chunk_from_disk(file_id, chunk.chunk_id)
+            chunk_data = self.read_chunk_from_disk(file_id, chunk.chunk_id, chunk.checksum)
             if chunk_data is None:
                 print(f"[{self.node_id}] Failed to retrieve chunk {chunk.chunk_id}")
                 return None
