@@ -94,6 +94,28 @@ class StorageVirtualNode:
             print(f"[{self.node_id}] Error writing chunk {chunk_id}: {e}")
             return False
 
+    def read_chunk_from_disk(self, file_id: str, chunk_id: int) -> Optional[bytes]:
+        """Read a chunk from disk"""
+        try:
+            # Create filename for this chunk
+            chunk_filename = f"{file_id}_chunk_{chunk_id}.bin"
+            chunk_path = os.path.join(self.chunks_path, chunk_filename)
+            
+            # Check if file exists
+            if not os.path.exists(chunk_path):
+                print(f"[{self.node_id}] Chunk {chunk_id} not found: {chunk_filename}")
+                return None
+            
+            # Read chunk data from disk
+            with open(chunk_path, 'rb') as f:
+                data = f.read()
+            
+            print(f"[{self.node_id}] Read chunk {chunk_id} from {chunk_filename} ({len(data)} bytes)")
+            return data
+        except Exception as e:
+            print(f"[{self.node_id}] Error reading chunk {chunk_id}: {e}")
+            return None
+
     def add_connection(self, node_id: str, bandwidth: int):
         """Add a network connection to another node"""
         self.connections[node_id] = bandwidth * 1000000  # Store in bits per second
@@ -212,11 +234,20 @@ class StorageVirtualNode:
         file_id: str,
         destination_node: str
     ) -> Optional[FileTransfer]:
-        """Initiate file retrieval to another node"""
+        """Initiate file retrieval to another node by reading chunks from disk"""
         if file_id not in self.stored_files:
+            print(f"[{self.node_id}] File {file_id} not found in stored files")
             return None
         
         file_transfer = self.stored_files[file_id]
+        
+        # Verify all chunks can be read from disk
+        print(f"[{self.node_id}] Retrieving file {file_transfer.file_name} ({len(file_transfer.chunks)} chunks)")
+        for chunk in file_transfer.chunks:
+            chunk_data = self.read_chunk_from_disk(file_id, chunk.chunk_id)
+            if chunk_data is None:
+                print(f"[{self.node_id}] Failed to retrieve chunk {chunk.chunk_id}")
+                return None
         
         # Create a new transfer record for the retrieval
         new_transfer = FileTransfer(
@@ -234,6 +265,7 @@ class StorageVirtualNode:
             ]
         )
         
+        print(f"[{self.node_id}] Successfully retrieved all chunks for {file_transfer.file_name}")
         return new_transfer
 
     def get_storage_utilization(self) -> Dict[str, Union[int, float, List[str]]]:
