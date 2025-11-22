@@ -2,9 +2,10 @@ import time
 import math
 import os
 import threading
+import signal
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union, Callable
 from enum import Enum, auto
 import hashlib
 from network_manager import NetworkManager
@@ -74,12 +75,17 @@ class StorageVirtualNode(threading.Thread):
         # Thread control
         self.running = False
         self.stop_event = threading.Event()
+        self.shutting_down = False  # Flag to indicate shutdown in progress
+        self.shutdown_complete = threading.Event()  # Event to signal shutdown complete
         
         # Thread locks for thread-safe operations
         self.storage_lock = threading.Lock()  # Protects storage operations
         self.transfer_lock = threading.Lock()  # Protects active_transfers
         self.metrics_lock = threading.Lock()  # Protects performance metrics
         self.network_lock = threading.Lock()  # Protects network operations
+        
+        # Shutdown callbacks
+        self.shutdown_callbacks: List[Callable[[], None]] = []
         
         # Network manager for real network communication
         self.network_manager = NetworkManager(node_id, host, port)
@@ -94,6 +100,9 @@ class StorageVirtualNode(threading.Thread):
         
         # Create storage directory structure
         self.create_storage_structure()
+        
+        # Set up signal handlers for graceful shutdown
+        self._setup_signal_handlers()
 
     def create_storage_structure(self):
         """Create directory structure for node storage on the host machine"""
@@ -109,6 +118,25 @@ class StorageVirtualNode(threading.Thread):
         self.chunks_path = chunks_path
         
         print(f"[{self.node_id}] Created storage structure at {base_path}")
+
+    def _setup_signal_handlers(self):
+        """
+        Set up signal handlers for graceful shutdown on SIGINT/SIGTERM
+        Note: Signal handlers only work in main thread
+        """
+        def signal_handler(signum, frame):
+            print(f"\n[{self.node_id}] Received signal {signum}, initiating graceful shutdown...")
+            self.stop(graceful=True, timeout=10.0)
+        
+        # Only set up signal handlers if we're in the main thread
+        if threading.current_thread() is threading.main_thread():
+            try:
+                signal.signal(signal.SIGINT, signal_handler)
+                signal.signal(signal.SIGTERM, signal_handler)
+                print(f"[{self.node_id}] Signal handlers registered for graceful shutdown")
+            except (ValueError, OSError) as e:
+                # Signal handling may not be available on all platforms
+                print(f"[{self.node_id}] Could not set up signal handlers: {e}")
 
     def _run_network_listener(self):
         """
@@ -147,7 +175,7 @@ class StorageVirtualNode(threading.Thread):
         print(f"[{self.node_id}] Network listener thread started on {self.host}:{self.port}")
         
         # Main node loop - will be extended in later commits
-        while self.running and not self.stop_event.is_set():
+        while self.running and not self.stop_event.is_set() and not self.shutting_down:
             try:
                 # Node autonomous operations will be added here
                 # For now, just check stop condition periodically
@@ -156,32 +184,127 @@ class StorageVirtualNode(threading.Thread):
                 print(f"[{self.node_id}] Error in node thread: {e}")
                 break
         
-        print(f"[{self.node_id}] Node thread stopped")
+        # Final cleanup before thread exits
+        if self.shutting_down:
+            print(f"[{self.node_id}] Node thread stopping due to shutdown request")
+        else:
+            print(f"[{self.node_id}] Node thread stopped")
     
-    def stop(self):
+    def register_shutdown_callback(self, callback: Callable[[], None]):
+        """
+        Register a callback to be called during graceful shutdown
+        
+        Args:
+            callback: Function to call during shutdown (no arguments)
+        """
+        self.shutdown_callbacks.append(callback)
+        print(f"[{self.node_id}] Registered shutdown callback")
+    
+    def _wait_for_active_transfers(self, timeout: float = 10.0) -> bool:
+        """
+        Wait for active transfers to complete
+        
+        Args:
+            timeout: Maximum time to wait in seconds
+            
+        Returns:
+            True if all transfers completed, False if timeout
+        """
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            with self.transfer_lock:
+                if len(self.active_transfers) == 0 and len(self.active_transfer_futures) == 0:
+                    return True
+            
+            time.sleep(0.5)  # Check every 500ms
+        
+        # Timeout reached
+        with self.transfer_lock:
+            remaining = len(self.active_transfers)
+            remaining_futures = len(self.active_transfer_futures)
+        
+        if remaining > 0 or remaining_futures > 0:
+            print(f"[{self.node_id}] Warning: {remaining} active transfers and {remaining_futures} futures still pending after timeout")
+            return False
+        
+        return True
+    
+    def stop(self, graceful: bool = True, timeout: float = 10.0):
         """
         Stop the node thread and network listener gracefully
+        
+        Args:
+            graceful: If True, wait for operations to complete
+            timeout: Maximum time to wait for graceful shutdown (seconds)
         """
+        if self.shutting_down:
+            print(f"[{self.node_id}] Shutdown already in progress")
+            return
+        
+        self.shutting_down = True
+        print(f"[{self.node_id}] Initiating graceful shutdown...")
+        
+        # Set stop flags
         self.running = False
         self.stop_event.set()
+        
+        # Execute shutdown callbacks
+        for callback in self.shutdown_callbacks:
+            try:
+                callback()
+            except Exception as e:
+                print(f"[{self.node_id}] Error in shutdown callback: {e}")
+        
+        if graceful:
+            # Wait for active transfers to complete
+            print(f"[{self.node_id}] Waiting for active transfers to complete (timeout: {timeout}s)...")
+            transfers_complete = self._wait_for_active_transfers(timeout)
+            
+            if not transfers_complete:
+                print(f"[{self.node_id}] Some transfers did not complete within timeout")
         
         # Shutdown transfer executor
         if self.transfer_executor:
             print(f"[{self.node_id}] Shutting down transfer executor...")
-            self.transfer_executor.shutdown(wait=True, timeout=5.0)
-            print(f"[{self.node_id}] Transfer executor shut down")
+            try:
+                self.transfer_executor.shutdown(wait=graceful, timeout=5.0)
+                print(f"[{self.node_id}] Transfer executor shut down")
+            except Exception as e:
+                print(f"[{self.node_id}] Error shutting down transfer executor: {e}")
         
         # Stop network manager
         if self.network_manager:
-            self.network_manager.stop_server()
+            try:
+                self.network_manager.stop_server()
+                print(f"[{self.node_id}] Network manager stopped")
+            except Exception as e:
+                print(f"[{self.node_id}] Error stopping network manager: {e}")
         
         # Wait for listener thread to finish
         if self.listener_thread and self.listener_thread.is_alive():
+            print(f"[{self.node_id}] Waiting for listener thread to finish...")
             self.listener_thread.join(timeout=2.0)
             if self.listener_thread.is_alive():
-                print(f"[{self.node_id}] Listener thread did not stop gracefully")
+                print(f"[{self.node_id}] Warning: Listener thread did not stop within timeout")
+            else:
+                print(f"[{self.node_id}] Listener thread stopped")
         
-        print(f"[{self.node_id}] Stop signal sent")
+        # Signal shutdown complete
+        self.shutdown_complete.set()
+        print(f"[{self.node_id}] Graceful shutdown complete")
+    
+    def wait_for_shutdown(self, timeout: Optional[float] = None) -> bool:
+        """
+        Wait for shutdown to complete
+        
+        Args:
+            timeout: Maximum time to wait (None = wait indefinitely)
+            
+        Returns:
+            True if shutdown completed, False if timeout
+        """
+        return self.shutdown_complete.wait(timeout=timeout)
 
     def write_chunk_to_disk(self, file_id: str, chunk_id: int, data: bytes) -> tuple[bool, str]:
         """Write a chunk to disk as a binary file and return checksum"""
@@ -297,6 +420,11 @@ class StorageVirtualNode(threading.Thread):
         source_node: Optional[str] = None
     ) -> Optional[FileTransfer]:
         """Initiate a file storage request to this node (thread-safe)"""
+        # Reject new transfers during shutdown
+        if self.shutting_down:
+            print(f"[{self.node_id}] Rejecting new transfer request - node is shutting down")
+            return None
+        
         # Check if we have enough storage space using actual disk usage
         with self.storage_lock:
             actual_usage = self.get_actual_disk_usage()
@@ -412,6 +540,11 @@ class StorageVirtualNode(threading.Thread):
         Returns:
             Future object representing the async operation, or None if error
         """
+        # Reject new transfers during shutdown
+        if self.shutting_down:
+            print(f"[{self.node_id}] Rejecting async transfer - node is shutting down")
+            return None
+        
         if not self.transfer_executor:
             print(f"[{self.node_id}] Transfer executor not initialized")
             return None
