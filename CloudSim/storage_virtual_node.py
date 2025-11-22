@@ -268,7 +268,12 @@ class StorageVirtualNode(threading.Thread):
         if self.transfer_executor:
             print(f"[{self.node_id}] Shutting down transfer executor...")
             try:
-                self.transfer_executor.shutdown(wait=graceful, timeout=5.0)
+                # ThreadPoolExecutor.shutdown() timeout parameter available in Python 3.9+
+                # Use graceful shutdown with wait parameter
+                if graceful:
+                    self.transfer_executor.shutdown(wait=True)
+                else:
+                    self.transfer_executor.shutdown(wait=False)
                 print(f"[{self.node_id}] Transfer executor shut down")
             except Exception as e:
                 print(f"[{self.node_id}] Error shutting down transfer executor: {e}")
