@@ -202,6 +202,14 @@ class MetricsCollector:
         self.collection_thread: Optional[threading.Thread] = None
         self.running = False
         
+        # Real-time throughput tracking {node_id: deque of (timestamp, bytes_transferred)}
+        self.throughput_windows: Dict[str, deque] = {}  # For calculating real-time throughput
+        self.throughput_window_size = 60  # Track last 60 seconds by default
+        
+        # Moving average configurations
+        self.sma_window_size = 10  # Simple Moving Average window (number of samples)
+        self.ema_alpha = 0.3  # Exponential Moving Average smoothing factor (0-1)
+        
         print("[MetricsCollector] Initialized")
     
     def set_node_factory(self, node_factory: NodeFactory):
@@ -213,6 +221,156 @@ class MetricsCollector:
         """
         self.node_factory = node_factory
         print(f"[MetricsCollector] NodeFactory set ({node_factory.get_node_count()} nodes)")
+    
+    def calculate_realtime_throughput(self, node_id: str, window_seconds: int = 60) -> float:
+        """
+        Calculate real-time throughput for a node based on recent transfers
+        
+        Args:
+            node_id: ID of the node
+            window_seconds: Time window in seconds to calculate throughput over (default: 60)
+            
+        Returns:
+            Throughput in MB/s
+        """
+        current_time = time.time()
+        cutoff_time = current_time - window_seconds
+        
+        # Get recent throughput samples for this node
+        throughput_samples = self.get_metric_samples(
+            MetricType.THROUGHPUT,
+            node_id=node_id,
+            limit=1000  # Get enough samples to cover the window
+        )
+        
+        if not throughput_samples:
+            return 0.0
+        
+        # Filter samples within the time window
+        recent_samples = [
+            s for s in throughput_samples
+            if s.timestamp.timestamp() >= cutoff_time
+        ]
+        
+        if not recent_samples:
+            return 0.0
+        
+        # Calculate average throughput over the window
+        total_throughput = sum(s.value for s in recent_samples)
+        average_throughput = total_throughput / len(recent_samples)
+        
+        return round(average_throughput, 2)
+    
+    def calculate_moving_average_throughput(
+        self,
+        node_id: str,
+        window_size: Optional[int] = None,
+        use_ema: bool = False
+    ) -> float:
+        """
+        Calculate moving average throughput for a node
+        
+        Args:
+            node_id: ID of the node
+            window_size: Number of samples for SMA (None = use default)
+            use_ema: If True, use Exponential Moving Average; if False, use Simple Moving Average
+            
+        Returns:
+            Moving average throughput in MB/s
+        """
+        throughput_samples = self.get_metric_samples(
+            MetricType.THROUGHPUT,
+            node_id=node_id,
+            limit=1000
+        )
+        
+        if not throughput_samples:
+            return 0.0
+        
+        if use_ema:
+            # Exponential Moving Average
+            if not throughput_samples:
+                return 0.0
+            
+            # Start with first value
+            ema = throughput_samples[0].value
+            
+            # Apply EMA formula: EMA = alpha * current + (1 - alpha) * previous_EMA
+            for sample in throughput_samples[1:]:
+                ema = self.ema_alpha * sample.value + (1 - self.ema_alpha) * ema
+            
+            return round(ema, 2)
+        else:
+            # Simple Moving Average
+            window = window_size or self.sma_window_size
+            recent_samples = throughput_samples[-window:] if len(throughput_samples) >= window else throughput_samples
+            
+            if not recent_samples:
+                return 0.0
+            
+            avg = sum(s.value for s in recent_samples) / len(recent_samples)
+            return round(avg, 2)
+    
+    def get_realtime_throughput_stats(self, node_id: Optional[str] = None) -> Dict:
+        """
+        Get real-time throughput statistics
+        
+        Args:
+            node_id: Optional node ID, or None for network-wide stats
+            
+        Returns:
+            Dictionary with throughput statistics
+        """
+        if node_id:
+            # Node-specific stats
+            current = self.calculate_realtime_throughput(node_id, window_seconds=10)
+            sma = self.calculate_moving_average_throughput(node_id, use_ema=False)
+            ema = self.calculate_moving_average_throughput(node_id, use_ema=True)
+            
+            # Get min/max from recent samples
+            samples = self.get_metric_samples(MetricType.THROUGHPUT, node_id=node_id, limit=100)
+            values = [s.value for s in samples] if samples else []
+            
+            return {
+                "node_id": node_id,
+                "current_throughput_mbps": current,
+                "sma_throughput_mbps": sma,
+                "ema_throughput_mbps": ema,
+                "min_throughput_mbps": round(min(values), 2) if values else 0.0,
+                "max_throughput_mbps": round(max(values), 2) if values else 0.0,
+                "sample_count": len(values),
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            # Network-wide stats
+            if not self.node_factory:
+                return {}
+            
+            node_stats = []
+            total_current = 0.0
+            total_sma = 0.0
+            total_ema = 0.0
+            
+            for nid in self.node_factory.node_configs.keys():
+                stats = self.get_realtime_throughput_stats(node_id=nid)
+                if stats:
+                    node_stats.append(stats)
+                    total_current += stats.get("current_throughput_mbps", 0)
+                    total_sma += stats.get("sma_throughput_mbps", 0)
+                    total_ema += stats.get("ema_throughput_mbps", 0)
+            
+            return {
+                "network_wide": True,
+                "total_current_throughput_mbps": round(total_current, 2),
+                "total_sma_throughput_mbps": round(total_sma, 2),
+                "total_ema_throughput_mbps": round(total_ema, 2),
+                "average_current_throughput_mbps": round(total_current / len(node_stats), 2) if node_stats else 0.0,
+                "average_sma_throughput_mbps": round(total_sma / len(node_stats), 2) if node_stats else 0.0,
+                "average_ema_throughput_mbps": round(total_ema / len(node_stats), 2) if node_stats else 0.0,
+                "node_count": len(node_stats),
+                "node_stats": node_stats,
+                "timestamp": datetime.now().isoformat()
+            }
     
     def collect_node_metrics(self, node_id: str) -> Optional[NodeMetrics]:
         """
@@ -243,10 +401,13 @@ class MetricsCollector:
             successful_transfers = total_transfers - failed_transfers
             error_rate = (failed_transfers / total_transfers * 100) if total_transfers > 0 else 0.0
             
+            # Calculate real-time throughput
+            realtime_throughput = self.calculate_realtime_throughput(node_id, window_seconds=60)
+            
             node_metrics = NodeMetrics(
                 node_id=node_id,
                 timestamp=datetime.now(),
-                throughput_mbps=0.0,  # Will be calculated from transfer metrics
+                throughput_mbps=realtime_throughput,  # Use real-time throughput
                 average_latency_ms=0.0,  # Will be calculated from transfer metrics
                 average_rtt_ms=0.0,  # Will be calculated from transfer metrics
                 storage_utilization_percent=storage_util.get("utilization_percent", 0.0),
