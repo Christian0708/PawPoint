@@ -10,6 +10,7 @@ from config_loader import ConfigLoader
 from node_factory import NodeFactory
 from metrics_collector import MetricsCollector
 from capacity_evaluator import CapacityEvaluator
+from logger import CloudSimLogger, get_logger
 
 
 class CloudSimCLI:
@@ -35,6 +36,10 @@ class CloudSimCLI:
         self.config = ConfigLoader(config_path)
         self.config.load()
         
+        # Setup logging
+        CloudSimLogger.setup_logging(self.config)
+        self.logger = get_logger("CloudSim.CLI")
+        
         # Initialize components
         start_port = self.config.get("node_factory.start_port", 5000)
         port_range = self.config.get("node_factory.port_range_size", 1000)
@@ -42,6 +47,8 @@ class CloudSimCLI:
         self.factory = NodeFactory(start_port=start_port, port_range_size=port_range)
         self.metrics = MetricsCollector(self.factory)
         self.capacity = CapacityEvaluator(self.factory)
+        
+        self.logger.info("CLI components initialized")
     
     def cmd_start(self, args):
         """Start nodes command"""
