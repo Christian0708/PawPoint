@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 from enum import Enum, auto
 import hashlib
+from network_manager import NetworkManager
 
 class TransferStatus(Enum):
     PENDING = auto()
@@ -38,7 +39,9 @@ class StorageVirtualNode(threading.Thread):
         cpu_capacity: int,  # in vCPUs
         memory_capacity: int,  # in GB
         storage_capacity: int,  # in GB
-        bandwidth: int  # in Mbps
+        bandwidth: int,  # in Mbps
+        host: str = "localhost",
+        port: int = 5000
     ):
         # Initialize thread
         super().__init__(name=f"Node-{node_id}", daemon=True)
@@ -48,6 +51,10 @@ class StorageVirtualNode(threading.Thread):
         self.memory_capacity = memory_capacity
         self.total_storage = storage_capacity * 1024 * 1024 * 1024  # Convert GB to bytes
         self.bandwidth = bandwidth * 1000000  # Convert Mbps to bits per second
+        
+        # Network configuration
+        self.host = host
+        self.port = port
         
         # Current utilization
         self.used_storage = 0
@@ -67,6 +74,18 @@ class StorageVirtualNode(threading.Thread):
         self.running = False
         self.stop_event = threading.Event()
         
+        # Thread locks for thread-safe operations
+        self.storage_lock = threading.Lock()  # Protects storage operations
+        self.transfer_lock = threading.Lock()  # Protects active_transfers
+        self.metrics_lock = threading.Lock()  # Protects performance metrics
+        self.network_lock = threading.Lock()  # Protects network operations
+        
+        # Network manager for real network communication
+        self.network_manager = NetworkManager(node_id, host, port)
+        
+        # Network listener thread (will be started separately)
+        self.listener_thread: Optional[threading.Thread] = None
+        
         # Create storage directory structure
         self.create_storage_structure()
 
@@ -85,6 +104,17 @@ class StorageVirtualNode(threading.Thread):
         
         print(f"[{self.node_id}] Created storage structure at {base_path}")
 
+    def _run_network_listener(self):
+        """
+        Run network listener in a separate thread
+        This method is executed by the listener thread
+        """
+        # Initialize and start the network listener
+        if self.network_manager.initialize_listener():
+            self.network_manager.start_server()
+        else:
+            print(f"[{self.node_id}] Failed to initialize network listener")
+    
     def run(self):
         """
         Main thread execution method
@@ -93,6 +123,15 @@ class StorageVirtualNode(threading.Thread):
         """
         self.running = True
         print(f"[{self.node_id}] Node thread started")
+        
+        # Start network listener in a separate thread
+        self.listener_thread = threading.Thread(
+            target=self._run_network_listener,
+            name=f"Listener-{self.node_id}",
+            daemon=True
+        )
+        self.listener_thread.start()
+        print(f"[{self.node_id}] Network listener thread started on {self.host}:{self.port}")
         
         # Main node loop - will be extended in later commits
         while self.running and not self.stop_event.is_set():
@@ -108,10 +147,21 @@ class StorageVirtualNode(threading.Thread):
     
     def stop(self):
         """
-        Stop the node thread gracefully
+        Stop the node thread and network listener gracefully
         """
         self.running = False
         self.stop_event.set()
+        
+        # Stop network manager
+        if self.network_manager:
+            self.network_manager.stop_server()
+        
+        # Wait for listener thread to finish
+        if self.listener_thread and self.listener_thread.is_alive():
+            self.listener_thread.join(timeout=2.0)
+            if self.listener_thread.is_alive():
+                print(f"[{self.node_id}] Listener thread did not stop gracefully")
+        
         print(f"[{self.node_id}] Stop signal sent")
 
     def write_chunk_to_disk(self, file_id: str, chunk_id: int, data: bytes) -> tuple[bool, str]:
@@ -180,15 +230,17 @@ class StorageVirtualNode(threading.Thread):
             return 0
 
     def sync_storage_metrics(self):
-        """Synchronize storage metrics with actual disk usage"""
-        actual_usage = self.get_actual_disk_usage()
-        if actual_usage != self.used_storage:
-            print(f"[{self.node_id}] Syncing storage: tracked={self.used_storage}, actual={actual_usage}")
-            self.used_storage = actual_usage
+        """Synchronize storage metrics with actual disk usage (thread-safe)"""
+        with self.storage_lock:
+            actual_usage = self.get_actual_disk_usage()
+            if actual_usage != self.used_storage:
+                print(f"[{self.node_id}] Syncing storage: tracked={self.used_storage}, actual={actual_usage}")
+                self.used_storage = actual_usage
 
     def add_connection(self, node_id: str, bandwidth: int):
-        """Add a network connection to another node"""
-        self.connections[node_id] = bandwidth * 1000000  # Store in bits per second
+        """Add a network connection to another node (thread-safe)"""
+        with self.network_lock:
+            self.connections[node_id] = bandwidth * 1000000  # Store in bits per second
 
     def _calculate_chunk_size(self, file_size: int) -> int:
         """Determine optimal chunk size based on file size"""
@@ -225,12 +277,13 @@ class StorageVirtualNode(threading.Thread):
         file_size: int,
         source_node: Optional[str] = None
     ) -> Optional[FileTransfer]:
-        """Initiate a file storage request to this node"""
+        """Initiate a file storage request to this node (thread-safe)"""
         # Check if we have enough storage space using actual disk usage
-        actual_usage = self.get_actual_disk_usage()
-        if actual_usage + file_size > self.total_storage:
-            print(f"[{self.node_id}] Insufficient storage: need {file_size} bytes, available {self.total_storage - actual_usage} bytes")
-            return None
+        with self.storage_lock:
+            actual_usage = self.get_actual_disk_usage()
+            if actual_usage + file_size > self.total_storage:
+                print(f"[{self.node_id}] Insufficient storage: need {file_size} bytes, available {self.total_storage - actual_usage} bytes")
+                return None
         
         # Create file transfer record
         chunks = self._generate_chunks(file_id, file_size)
@@ -241,7 +294,10 @@ class StorageVirtualNode(threading.Thread):
             chunks=chunks
         )
         
-        self.active_transfers[file_id] = transfer
+        # Add to active transfers (thread-safe)
+        with self.transfer_lock:
+            self.active_transfers[file_id] = transfer
+        
         return transfer
 
     def process_chunk_transfer(
@@ -250,26 +306,28 @@ class StorageVirtualNode(threading.Thread):
         chunk_id: int,
         source_node: str
     ) -> bool:
-        """Process an incoming file chunk"""
-        if file_id not in self.active_transfers:
-            return False
-        
-        transfer = self.active_transfers[file_id]
+        """Process an incoming file chunk (thread-safe)"""
+        # Get transfer (thread-safe)
+        with self.transfer_lock:
+            if file_id not in self.active_transfers:
+                return False
+            transfer = self.active_transfers[file_id]
         
         try:
             chunk = next(c for c in transfer.chunks if c.chunk_id == chunk_id)
         except StopIteration:
             return False
         
-        # Simulate network transfer time
-        chunk_size_bits = chunk.size * 8  # Convert bytes to bits
-        available_bandwidth = min(
-            self.bandwidth - self.network_utilization,
-            self.connections.get(source_node, 0)
-        )
-        
-        if available_bandwidth <= 0:
-            return False
+        # Get network bandwidth (thread-safe)
+        with self.network_lock:
+            chunk_size_bits = chunk.size * 8  # Convert bytes to bits
+            available_bandwidth = min(
+                self.bandwidth - self.network_utilization,
+                self.connections.get(source_node, 0)
+            )
+            
+            if available_bandwidth <= 0:
+                return False
         
         # Calculate transfer time (in seconds)
         transfer_time = chunk_size_bits / available_bandwidth
@@ -288,20 +346,33 @@ class StorageVirtualNode(threading.Thread):
         chunk.status = TransferStatus.COMPLETED
         chunk.stored_node = self.node_id
         
-        # Update metrics
-        self.network_utilization += available_bandwidth * 0.8  # Simulate some fluctuation
-        self.total_data_transferred += chunk.size
+        # Update network metrics (thread-safe)
+        with self.network_lock:
+            self.network_utilization += available_bandwidth * 0.8  # Simulate some fluctuation
         
-        # Check if all chunks are completed
-        if all(c.status == TransferStatus.COMPLETED for c in transfer.chunks):
-            transfer.status = TransferStatus.COMPLETED
-            transfer.completed_at = time.time()
-            self.stored_files[file_id] = transfer
-            del self.active_transfers[file_id]
-            self.total_requests_processed += 1
-            
-            # Sync storage metrics with actual disk usage
-            self.sync_storage_metrics()
+        # Update performance metrics (thread-safe)
+        with self.metrics_lock:
+            self.total_data_transferred += chunk.size
+        
+        # Check if all chunks are completed (thread-safe)
+        with self.transfer_lock:
+            if all(c.status == TransferStatus.COMPLETED for c in transfer.chunks):
+                transfer.status = TransferStatus.COMPLETED
+                transfer.completed_at = time.time()
+                
+                # Move to stored files (thread-safe)
+                with self.storage_lock:
+                    self.stored_files[file_id] = transfer
+                
+                # Remove from active transfers
+                del self.active_transfers[file_id]
+                
+                # Update metrics (thread-safe)
+                with self.metrics_lock:
+                    self.total_requests_processed += 1
+                
+                # Sync storage metrics with actual disk usage
+                self.sync_storage_metrics()
         
         return True
 
@@ -310,12 +381,13 @@ class StorageVirtualNode(threading.Thread):
         file_id: str,
         destination_node: str
     ) -> Optional[FileTransfer]:
-        """Initiate file retrieval to another node by reading chunks from disk"""
-        if file_id not in self.stored_files:
-            print(f"[{self.node_id}] File {file_id} not found in stored files")
-            return None
-        
-        file_transfer = self.stored_files[file_id]
+        """Initiate file retrieval to another node by reading chunks from disk (thread-safe)"""
+        with self.storage_lock:
+            if file_id not in self.stored_files:
+                print(f"[{self.node_id}] File {file_id} not found in stored files")
+                return None
+            
+            file_transfer = self.stored_files[file_id]
         
         # Verify all chunks can be read from disk and checksums match
         print(f"[{self.node_id}] Retrieving file {file_transfer.file_name} ({len(file_transfer.chunks)} chunks)")
@@ -345,35 +417,55 @@ class StorageVirtualNode(threading.Thread):
         return new_transfer
 
     def get_storage_utilization(self) -> Dict[str, Union[int, float, List[str]]]:
-        """Get current storage utilization metrics using actual disk usage"""
+        """Get current storage utilization metrics using actual disk usage (thread-safe)"""
         # Get real disk usage
         actual_disk_usage = self.get_actual_disk_usage()
         
+        with self.storage_lock:
+            tracked_storage = self.used_storage
+            files_stored = len(self.stored_files)
+        
+        with self.transfer_lock:
+            active_transfers = len(self.active_transfers)
+        
         return {
             "used_bytes": actual_disk_usage,  # int - actual disk usage
-            "tracked_bytes": self.used_storage,  # int - tracked usage (may differ)
+            "tracked_bytes": tracked_storage,  # int - tracked usage (may differ)
             "total_bytes": self.total_storage,  # int
             "utilization_percent": (actual_disk_usage / self.total_storage) * 100,  # float
-            "files_stored": len(self.stored_files),  # int
-            "active_transfers": len(self.active_transfers),  # int
+            "files_stored": files_stored,  # int
+            "active_transfers": active_transfers,  # int
             "chunk_count": len(os.listdir(self.chunks_path)) if os.path.exists(self.chunks_path) else 0  # int
         }
 
     def get_network_utilization(self) -> Dict[str, Union[int, float, List[str]]]:
-        """Get current network utilization metrics"""
+        """Get current network utilization metrics (thread-safe)"""
         total_bandwidth_bps = self.bandwidth
+        
+        with self.network_lock:
+            current_utilization = self.network_utilization
+            connections_list = list(self.connections.keys())
+        
         return {
-            "current_utilization_bps": self.network_utilization,  # float
+            "current_utilization_bps": current_utilization,  # float
             "max_bandwidth_bps": total_bandwidth_bps,  # int
-            "utilization_percent": (self.network_utilization / total_bandwidth_bps) * 100,  # float
-            "connections": list(self.connections.keys())  # List[str]
+            "utilization_percent": (current_utilization / total_bandwidth_bps) * 100,  # float
+            "connections": connections_list  # List[str]
         }
 
     def get_performance_metrics(self) -> Dict[str, int]:
-        """Get node performance metrics"""
+        """Get node performance metrics (thread-safe)"""
+        with self.metrics_lock:
+            requests_processed = self.total_requests_processed
+            data_transferred = self.total_data_transferred
+            failed = self.failed_transfers
+        
+        with self.transfer_lock:
+            active_transfers = len(self.active_transfers)
+        
         return {
-            "total_requests_processed": self.total_requests_processed,
-            "total_data_transferred_bytes": self.total_data_transferred,
-            "failed_transfers": self.failed_transfers,
-            "current_active_transfers": len(self.active_transfers)
+            "total_requests_processed": requests_processed,
+            "total_data_transferred_bytes": data_transferred,
+            "failed_transfers": failed,
+            "current_active_transfers": active_transfers
         }
