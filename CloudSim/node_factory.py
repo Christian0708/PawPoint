@@ -80,10 +80,9 @@ class NodeFactory:
                 return None
         
         # Check if port is already in use (double-check before creating)
-        if self._is_port_in_use(port, host):
+        # Skip this check if we just auto-assigned the port (it's already reserved and checked)
+        if not port_was_auto_assigned and self._is_port_in_use(port, host):
             print(f"[NodeFactory] Port {port} on {host} is already in use")
-            if port_was_auto_assigned:
-                self._release_reserved_port(port)
             return None
         
         try:
@@ -136,6 +135,7 @@ class NodeFactory:
         """
         port = self.start_port
         max_port = self.start_port + self.port_range_size
+        max_attempts = 3  # Retry up to 3 times for each port on Windows
         
         while port < max_port:
             # Check if port is reserved
@@ -143,8 +143,19 @@ class NodeFactory:
                 port += 1
                 continue
             
-            # Check if port is in use
-            if not self._is_port_in_use(port, host):
+            # Check if port is in use - retry on Windows due to TIME_WAIT states
+            port_available = False
+            for attempt in range(max_attempts):
+                if not self._is_port_in_use(port, host):
+                    port_available = True
+                    break
+                # On Windows, ports in TIME_WAIT might be temporarily unavailable
+                # Wait a bit and retry (only for first attempt, then move on)
+                if attempt < max_attempts - 1:
+                    import time
+                    time.sleep(0.1)  # Small delay
+            
+            if port_available:
                 # Reserve the port temporarily
                 self.reserved_ports.add(port)
                 return port
@@ -199,17 +210,30 @@ class NodeFactory:
         try:
             # Create a test socket
             test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Use SO_REUSEADDR to allow binding even if port is in TIME_WAIT state
             test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # On Windows, also set SO_EXCLUSIVEADDRUSE to False to allow reuse
+            try:
+                test_socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 0)
+            except (AttributeError, OSError):
+                # SO_EXCLUSIVEADDRUSE might not be available on all systems
+                pass
             
             # Try to bind to the port
             try:
                 test_socket.bind((host, port))
                 test_socket.close()
                 return False  # Port is available
-            except OSError:
-                # Port is in use
-                test_socket.close()
-                return True
+            except OSError as e:
+                # Port is in use - check if it's a real error or just TIME_WAIT
+                errno = getattr(e, 'errno', None)
+                if errno in (98, 10048):  # Address already in use (Linux/Windows)
+                    test_socket.close()
+                    return True
+                else:
+                    # Other error - might be temporary, but assume in use
+                    test_socket.close()
+                    return True
         except Exception as e:
             # On error, assume port might be in use (safer)
             print(f"[NodeFactory] Error checking port {port}: {e}")

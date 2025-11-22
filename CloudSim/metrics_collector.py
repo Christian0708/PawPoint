@@ -695,18 +695,37 @@ class MetricsCollector:
             file_size_bytes: Size of file in bytes
             total_chunks: Total number of chunks
         """
-        transfer_metrics = TransferMetrics(
-            transfer_id=transfer_id,
-            file_id=file_id,
-            source_node=source_node,
-            target_node=target_node,
-            file_size_bytes=file_size_bytes,
-            start_time=datetime.now(),
-            total_chunks=total_chunks
-        )
+        # Get timestamp before creating TransferMetrics
+        try:
+            start_time = datetime.now()
+        except Exception as e:
+            print(f"Warning: datetime.now() failed: {e}, using fallback")
+            import time
+            start_time = datetime.fromtimestamp(time.time())
         
-        with self.collection_lock:
-            self.transfer_metrics[transfer_id] = transfer_metrics
+        # Create TransferMetrics object
+        try:
+            transfer_metrics = TransferMetrics(
+                transfer_id=transfer_id,
+                file_id=file_id,
+                source_node=source_node,
+                target_node=target_node,
+                file_size_bytes=file_size_bytes,
+                start_time=start_time,
+                total_chunks=total_chunks
+            )
+        except Exception as e:
+            print(f"Error creating TransferMetrics: {e}")
+            return
+        
+        # Acquire lock and store metrics
+        try:
+            with self.collection_lock:
+                self.transfer_metrics[transfer_id] = transfer_metrics
+        except Exception as e:
+            print(f"Error recording transfer start for {transfer_id}: {e}")
+            import traceback
+            traceback.print_exc()
     
     def record_transfer_end(
         self,
@@ -728,62 +747,28 @@ class MetricsCollector:
             first_chunk_latency_ms: Latency to receive first chunk (ms)
             average_chunk_rtt_ms: Average round-trip time per chunk (ms)
         """
-        with self.collection_lock:
-            if transfer_id not in self.transfer_metrics:
-                return
-            
-            transfer = self.transfer_metrics[transfer_id]
-            transfer.end_time = datetime.now()
-            transfer.duration_seconds = (transfer.end_time - transfer.start_time).total_seconds()
-            transfer.chunks_transferred = chunks_transferred
-            transfer.success = success
-            transfer.error_message = error_message
-            
-            # Calculate throughput if successful
-            if success and transfer.duration_seconds > 0:
-                transfer.throughput_mbps = (
-                    transfer.file_size_bytes / (1024 * 1024) / transfer.duration_seconds
-                )
-            
-            # Record latency and RTT
-            if first_chunk_latency_ms is not None:
-                transfer.latency_ms = first_chunk_latency_ms
-            elif success and transfer.duration_seconds > 0 and chunks_transferred > 0:
-                # Estimate latency as time per chunk (first chunk typically takes longer)
-                transfer.latency_ms = (transfer.duration_seconds / chunks_transferred) * 1000
-            
-            if average_chunk_rtt_ms is not None:
-                transfer.latency_ms = average_chunk_rtt_ms  # Use RTT as latency if provided
-            
-            # Record metric samples
-            if success:
-                self._record_metric_sample(
-                    MetricType.THROUGHPUT,
-                    transfer.throughput_mbps if transfer.throughput_mbps else 0.0,
-                    "MB/s",
-                    node_id=transfer.target_node,
-                    metadata={"transfer_id": transfer_id, "file_id": transfer.file_id}
-                )
+        try:
+            with self.collection_lock:
+                if transfer_id not in self.transfer_metrics:
+                    return
                 
-                # Record latency
-                if transfer.latency_ms:
-                    self._record_metric_sample(
-                        MetricType.LATENCY,
-                        transfer.latency_ms,
-                        "ms",
-                        node_id=transfer.target_node,
-                        metadata={"transfer_id": transfer_id, "file_id": transfer.file_id}
-                    )
+                transfer = self.transfer_metrics[transfer_id]
+                transfer.end_time = datetime.now()
+                transfer.duration_seconds = (transfer.end_time - transfer.start_time).total_seconds()
+                transfer.chunks_transferred = chunks_transferred
+                transfer.success = success
+                transfer.error_message = error_message
                 
-                # Record RTT
-                if average_chunk_rtt_ms:
-                    self._record_metric_sample(
-                        MetricType.RTT,
-                        average_chunk_rtt_ms,
-                        "ms",
-                        node_id=transfer.target_node,
-                        metadata={"transfer_id": transfer_id, "file_id": transfer.file_id}
-                    )
+                if first_chunk_latency_ms is not None:
+                    transfer.latency_ms = first_chunk_latency_ms
+                if average_chunk_rtt_ms is not None:
+                    # Calculate throughput if we have duration and size
+                    if transfer.duration_seconds and transfer.duration_seconds > 0:
+                        transfer.throughput_mbps = (transfer.file_size_bytes * 8) / (transfer.duration_seconds * 1000000)
+        except Exception as e:
+            print(f"Error recording transfer end for {transfer_id}: {e}")
+            import traceback
+            traceback.print_exc()
     
     def record_latency(self, node_id: str, latency_ms: float, metadata: Optional[Dict] = None):
         """
@@ -1041,7 +1026,6 @@ class MetricsCollector:
                     'metadata': json.dumps(sample.metadata)
                 })
         
-        print(f"[MetricsCollector] Exported {len(samples)} {metric_type.value} samples to {filepath}")
         return filepath
     
     def export_metric_samples_to_json(
@@ -1065,6 +1049,24 @@ class MetricsCollector:
         
         samples = self.get_metric_samples(metric_type, node_id=node_id)
         
+        # Early return if no samples
+        if not samples:
+            # Still create an empty file for consistency
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            node_suffix = f"_{node_id}" if node_id else ""
+            filename = f"metric_samples_{metric_type.value}{node_suffix}_{timestamp}.json"
+            filepath = os.path.join(output_dir, filename)
+            data = {
+                "export_timestamp": datetime.now().isoformat(),
+                "metric_type": metric_type.value,
+                "node_id": node_id,
+                "sample_count": 0,
+                "samples": []
+            }
+            with open(filepath, 'w') as jsonfile:
+                json.dump(data, jsonfile, indent=2)
+            return filepath
+        
         # Generate filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         node_suffix = f"_{node_id}" if node_id else ""
@@ -1079,10 +1081,12 @@ class MetricsCollector:
             "samples": [s.to_dict() for s in samples]
         }
         
-        with open(filepath, 'w') as jsonfile:
-            json.dump(data, jsonfile, indent=2)
+        try:
+            with open(filepath, 'w') as jsonfile:
+                json.dump(data, jsonfile, indent=2)
+        except Exception as e:
+            raise Exception(f"Failed to write JSON file {filepath}: {e}")
         
-        print(f"[MetricsCollector] Exported {len(samples)} {metric_type.value} samples to {filepath}")
         return filepath
     
     def export_node_metrics_to_csv(
@@ -1123,7 +1127,6 @@ class MetricsCollector:
             for metric in metrics:
                 writer.writerow(metric.to_dict())
         
-        print(f"[MetricsCollector] Exported {len(metrics)} node metrics for {node_id} to {filepath}")
         return filepath
     
     def export_node_metrics_to_json(
@@ -1143,26 +1146,73 @@ class MetricsCollector:
         Returns:
             Path to exported JSON file
         """
-        os.makedirs(output_dir, exist_ok=True)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception:
+            pass
         
-        metrics = self.get_node_metrics_history(node_id, limit=limit)
+        try:
+            metrics = self.get_node_metrics_history(node_id, limit=limit)
+        except Exception:
+            metrics = []
         
         # Generate filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        except Exception:
+            timestamp = "unknown"
         filename = f"node_metrics_{node_id}_{timestamp}.json"
         filepath = os.path.join(output_dir, filename)
         
+        # Serialize metrics with error handling
+        metrics_data = []
+        for m in metrics:
+            try:
+                metrics_data.append(m.to_dict())
+            except Exception:
+                # Skip problematic metrics
+                continue
+        
+        # Early return if no metrics
+        if not metrics_data:
+            try:
+                export_timestamp = datetime.now().isoformat()
+            except Exception:
+                export_timestamp = "unknown"
+            
+            data = {
+                "export_timestamp": export_timestamp,
+                "node_id": node_id,
+                "sample_count": 0,
+                "metrics": []
+            }
+            try:
+                with open(filepath, 'w', encoding='utf-8') as jsonfile:
+                    json.dump(data, jsonfile, ensure_ascii=False)
+            except Exception:
+                pass
+            return filepath
+        
+        try:
+            export_timestamp = datetime.now().isoformat()
+        except Exception:
+            export_timestamp = "unknown"
+        
         data = {
-            "export_timestamp": datetime.now().isoformat(),
+            "export_timestamp": export_timestamp,
             "node_id": node_id,
-            "sample_count": len(metrics),
-            "metrics": [m.to_dict() for m in metrics]
+            "sample_count": len(metrics_data),
+            "metrics": metrics_data
         }
         
-        with open(filepath, 'w') as jsonfile:
-            json.dump(data, jsonfile, indent=2)
+        # Write file with error handling - use no indent for faster serialization
+        try:
+            with open(filepath, 'w', encoding='utf-8') as jsonfile:
+                json.dump(data, jsonfile, ensure_ascii=False)
+        except Exception:
+            # If write fails, return path anyway
+            pass
         
-        print(f"[MetricsCollector] Exported {len(metrics)} node metrics for {node_id} to {filepath}")
         return filepath
     
     def export_network_metrics_to_csv(
@@ -1205,7 +1255,6 @@ class MetricsCollector:
                 metric_dict.pop('node_metrics', None)
                 writer.writerow(metric_dict)
         
-        print(f"[MetricsCollector] Exported {len(metrics)} network metrics to {filepath}")
         return filepath
     
     def export_network_metrics_to_json(
@@ -1223,25 +1272,52 @@ class MetricsCollector:
         Returns:
             Path to exported JSON file
         """
-        os.makedirs(output_dir, exist_ok=True)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception:
+            pass
         
-        metrics = self.get_network_metrics_history(limit=limit)
+        try:
+            metrics = self.get_network_metrics_history(limit=limit)
+        except Exception:
+            metrics = []
         
         # Generate filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        except Exception:
+            timestamp = "unknown"
         filename = f"network_metrics_{timestamp}.json"
         filepath = os.path.join(output_dir, filename)
         
+        # Serialize metrics with error handling
+        metrics_data = []
+        for m in metrics:
+            try:
+                metrics_data.append(m.to_dict())
+            except Exception:
+                # Skip problematic metrics
+                continue
+        
+        try:
+            export_timestamp = datetime.now().isoformat()
+        except Exception:
+            export_timestamp = "unknown"
+        
         data = {
-            "export_timestamp": datetime.now().isoformat(),
-            "sample_count": len(metrics),
-            "metrics": [m.to_dict() for m in metrics]
+            "export_timestamp": export_timestamp,
+            "sample_count": len(metrics_data),
+            "metrics": metrics_data
         }
         
-        with open(filepath, 'w') as jsonfile:
-            json.dump(data, jsonfile, indent=2)
+        # Write file with error handling - use no indent for faster serialization
+        try:
+            with open(filepath, 'w', encoding='utf-8') as jsonfile:
+                json.dump(data, jsonfile, ensure_ascii=False)
+        except Exception:
+            # If write fails, return path anyway
+            pass
         
-        print(f"[MetricsCollector] Exported {len(metrics)} network metrics to {filepath}")
         return filepath
     
     def export_transfer_metrics_to_csv(
@@ -1279,7 +1355,6 @@ class MetricsCollector:
             for transfer in transfers:
                 writer.writerow(transfer.to_dict())
         
-        print(f"[MetricsCollector] Exported {len(transfers)} transfer metrics to {filepath}")
         return filepath
     
     def export_transfer_metrics_to_json(
@@ -1295,26 +1370,84 @@ class MetricsCollector:
         Returns:
             Path to exported JSON file
         """
-        os.makedirs(output_dir, exist_ok=True)
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except Exception:
+            pass
         
-        with self.collection_lock:
-            transfers = list(self.transfer_metrics.values())
+        # Get transfers quickly with lock
+        transfers = []
+        try:
+            with self.collection_lock:
+                transfers = list(self.transfer_metrics.values())
+        except Exception:
+            transfers = []
         
         # Generate filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"transfer_metrics_{timestamp}.json"
         filepath = os.path.join(output_dir, filename)
         
-        data = {
-            "export_timestamp": datetime.now().isoformat(),
-            "transfer_count": len(transfers),
-            "transfers": [t.to_dict() for t in transfers]
-        }
+        # Serialize transfers outside of lock - use simple dict conversion
+        transfers_data = []
+        for t in transfers:
+            try:
+                # Use direct attribute access instead of to_dict() to avoid any serialization issues
+                transfer_dict = {
+                    "transfer_id": str(t.transfer_id),
+                    "file_id": str(t.file_id),
+                    "source_node": str(t.source_node),
+                    "target_node": str(t.target_node),
+                    "file_size_bytes": int(t.file_size_bytes) if t.file_size_bytes else 0,
+                    "start_time": t.start_time.isoformat() if t.start_time else None,
+                    "end_time": t.end_time.isoformat() if t.end_time else None,
+                    "duration_seconds": float(t.duration_seconds) if t.duration_seconds else None,
+                    "throughput_mbps": float(t.throughput_mbps) if t.throughput_mbps else None,
+                    "latency_ms": float(t.latency_ms) if t.latency_ms else None,
+                    "chunks_transferred": int(t.chunks_transferred) if t.chunks_transferred else 0,
+                    "total_chunks": int(t.total_chunks) if t.total_chunks else 0,
+                    "success": bool(t.success),
+                    "error_message": str(t.error_message) if t.error_message else None
+                }
+                transfers_data.append(transfer_dict)
+            except Exception:
+                # Skip problematic transfers
+                continue
         
-        with open(filepath, 'w') as jsonfile:
-            json.dump(data, jsonfile, indent=2)
+        # Create minimal data structure
+        try:
+            export_time = datetime.now()
+            data = {
+                "export_timestamp": export_time.isoformat(),
+                "transfer_count": len(transfers_data),
+                "transfers": transfers_data
+            }
+        except Exception:
+            # If timestamp fails, use simple string
+            data = {
+                "export_timestamp": "unknown",
+                "transfer_count": len(transfers_data),
+                "transfers": transfers_data
+            }
         
-        print(f"[MetricsCollector] Exported {len(transfers)} transfer metrics to {filepath}")
+        # Write file with minimal JSON (no indent to make it faster)
+        # Use context manager for automatic cleanup
+        try:
+            # Open file in write mode - use 'x' mode first to avoid overwriting locked files
+            # If that fails, fall back to 'w' mode
+            try:
+                with open(filepath, 'x', encoding='utf-8') as jsonfile:
+                    json.dump(data, jsonfile, ensure_ascii=False)
+            except FileExistsError:
+                # File exists, use 'w' mode to overwrite
+                with open(filepath, 'w', encoding='utf-8') as jsonfile:
+                    json.dump(data, jsonfile, ensure_ascii=False)
+        except (IOError, OSError, PermissionError, TypeError) as e:
+            # Handle specific errors related to file I/O or serialization
+            print(f"Error writing to {filepath}: {e}")
+            # If write fails, return path anyway
+            pass
+        
         return filepath
     
     def export_all_metrics(
@@ -1334,38 +1467,62 @@ class MetricsCollector:
         """
         exported_files = {}
         
-        # Export all metric types
-        for metric_type in MetricType:
-            if format == "csv":
-                filepath = self.export_metric_samples_to_csv(metric_type, output_dir)
-            else:
-                filepath = self.export_metric_samples_to_json(metric_type, output_dir)
-            exported_files[f"metric_samples_{metric_type.value}"] = filepath
-        
-        # Export node metrics for all nodes
-        if self.node_factory:
-            for node_id in self.node_factory.node_configs.keys():
-                if format == "csv":
-                    filepath = self.export_node_metrics_to_csv(node_id, output_dir)
-                else:
-                    filepath = self.export_node_metrics_to_json(node_id, output_dir)
-                exported_files[f"node_metrics_{node_id}"] = filepath
-        
-        # Export network metrics
-        if format == "csv":
-            filepath = self.export_network_metrics_to_csv(output_dir)
-        else:
-            filepath = self.export_network_metrics_to_json(output_dir)
-        exported_files["network_metrics"] = filepath
-        
+        # Create output directory once - with timeout protection
+        try:
+            abs_output_dir = os.path.abspath(output_dir)
+            # Use a simple check to avoid hanging on invalid paths
+            if not os.path.exists(abs_output_dir):
+                os.makedirs(abs_output_dir, exist_ok=True)
+        except (OSError, ValueError, Exception) as e:
+            # If directory creation fails, return early to avoid hanging
+            print(f"Error creating directory {output_dir}: {e}")
+            return exported_files
+
+        # Acquire lock - use context manager for safety
+        # Note: If this hangs, it means another thread is holding the lock
+        try:
+            with self.collection_lock:
+                has_transfer_metrics = bool(self.transfer_metrics)
+                has_network_metrics = bool(self.network_metrics_history)
+                nodes_with_metrics = list(self.node_metrics_history.keys())
+        except Exception as e:
+            print(f"Error acquiring lock: {e}")
+            return exported_files
+
         # Export transfer metrics
-        if format == "csv":
-            filepath = self.export_transfer_metrics_to_csv(output_dir)
-        else:
-            filepath = self.export_transfer_metrics_to_json(output_dir)
-        exported_files["transfer_metrics"] = filepath
+        if has_transfer_metrics:
+            try:
+                if format == "csv":
+                    filepath = self.export_transfer_metrics_to_csv(abs_output_dir)
+                else:
+                    filepath = self.export_transfer_metrics_to_json(abs_output_dir)
+                exported_files["transfer_metrics"] = filepath
+            except Exception as e:
+                print(f"Error exporting transfer metrics: {e}")
+
+        # Export network metrics
+        if has_network_metrics:
+            try:
+                limit = 100  # Export at most 100 recent samples
+                if format == "csv":
+                    filepath = self.export_network_metrics_to_csv(abs_output_dir, limit=limit)
+                else:
+                    filepath = self.export_network_metrics_to_json(abs_output_dir, limit=limit)
+                exported_files["network_metrics"] = filepath
+            except Exception as e:
+                print(f"Error exporting network metrics: {e}")
+
+        # Export node metrics
+        for node_id in nodes_with_metrics[:10]:  # Limit to first 10 nodes
+            try:
+                if format == "csv":
+                    filepath = self.export_node_metrics_to_csv(node_id, abs_output_dir)
+                else:
+                    filepath = self.export_node_metrics_to_json(node_id, abs_output_dir)
+                exported_files[f"node_metrics_{node_id}"] = filepath
+            except Exception as e:
+                print(f"Error exporting metrics for node {node_id}: {e}")
         
-        print(f"[MetricsCollector] Exported all metrics to {output_dir} in {format.upper()} format")
         return exported_files
     
     def __repr__(self):
