@@ -57,20 +57,34 @@ class CloudSimCLI:
         
         if args.nodes:
             # Start specific nodes
+            started = 0
+            already_running = 0
             for node_id in args.nodes:
                 node = self.factory.get_node(node_id)
                 if node:
                     if not node.is_alive():
-                        node.start()
-                        print(f"Started node: {node_id}")
+                        try:
+                            node.start()
+                            print(f"✓ Started node: {node_id}")
+                            started += 1
+                        except Exception as e:
+                            print(f"✗ Error starting node {node_id}: {e}")
                     else:
-                        print(f"Node {node_id} is already running")
+                        print(f"○ Node {node_id} is already running")
+                        already_running += 1
                 else:
-                    print(f"Node {node_id} not found")
+                    print(f"✗ Node {node_id} not found")
+            
+            if started > 0 or already_running > 0:
+                print(f"\nStarted: {started}, Already running: {already_running}")
         else:
             # Start all nodes
-            self.factory.start_all_nodes()
-            print("All nodes started")
+            try:
+                self.factory.start_all_nodes()
+                print("✓ All nodes started")
+            except Exception as e:
+                print(f"✗ Error starting nodes: {e}")
+                sys.exit(1)
     
     def cmd_stop(self, args):
         """Stop nodes command"""
@@ -79,18 +93,62 @@ class CloudSimCLI:
         
         if args.nodes:
             # Stop specific nodes
+            stopped = 0
             for node_id in args.nodes:
                 node = self.factory.get_node(node_id)
                 if node:
-                    node.stop(graceful=args.graceful, timeout=args.timeout)
-                    node.join(timeout=3.0)
-                    print(f"Stopped node: {node_id}")
+                    try:
+                        node.stop(graceful=args.graceful, timeout=args.timeout)
+                        node.join(timeout=3.0)
+                        print(f"✓ Stopped node: {node_id}")
+                        stopped += 1
+                    except Exception as e:
+                        print(f"✗ Error stopping node {node_id}: {e}")
                 else:
-                    print(f"Node {node_id} not found")
+                    print(f"✗ Node {node_id} not found")
+            
+            if stopped > 0:
+                print(f"\nStopped {stopped} node(s)")
         else:
             # Stop all nodes
-            self.factory.stop_all_nodes(graceful=args.graceful, timeout=args.timeout)
-            print("All nodes stopped")
+            try:
+                self.factory.stop_all_nodes(graceful=args.graceful, timeout=args.timeout)
+                print("✓ All nodes stopped")
+            except Exception as e:
+                print(f"✗ Error stopping nodes: {e}")
+                sys.exit(1)
+    
+    def cmd_restart(self, args):
+        """Restart nodes command"""
+        if not self.factory:
+            self.setup()
+        
+        if args.nodes:
+            # Restart specific nodes
+            for node_id in args.nodes:
+                node = self.factory.get_node(node_id)
+                if node:
+                    print(f"Restarting node: {node_id}...")
+                    try:
+                        # Stop
+                        node.stop(graceful=args.graceful, timeout=args.timeout)
+                        node.join(timeout=3.0)
+                        # Start
+                        node.start()
+                        print(f"✓ Restarted node: {node_id}")
+                    except Exception as e:
+                        print(f"✗ Error restarting node {node_id}: {e}")
+                else:
+                    print(f"✗ Node {node_id} not found")
+        else:
+            # Restart all nodes
+            print("Restarting all nodes...")
+            try:
+                self.factory.restart_all_nodes(graceful=args.graceful, timeout=args.timeout)
+                print("✓ All nodes restarted")
+            except Exception as e:
+                print(f"✗ Error restarting nodes: {e}")
+                sys.exit(1)
     
     def cmd_status(self, args):
         """Status command"""
@@ -100,22 +158,79 @@ class CloudSimCLI:
         if args.node:
             # Status of specific node
             node = self.factory.get_node(args.node)
-            if node:
-                is_running = node.is_alive() or node.running
-                storage_util = node.get_storage_utilization() if is_running else {}
-                print(f"\nNode: {args.node}")
-                print(f"Status: {'Running' if is_running else 'Stopped'}")
-                print(f"Storage: {storage_util.get('utilization_percent', 0):.2f}%")
-                print(f"Files: {storage_util.get('files_stored', 0)}")
+            if not node:
+                print(f"Error: Node '{args.node}' not found")
+                sys.exit(1)
+            
+            is_running = node.is_alive() or node.running
+            config = self.factory.node_configs.get(args.node, {})
+            
+            if is_running:
+                storage_util = node.get_storage_utilization()
+                network_util = node.get_network_utilization()
+                performance = node.get_performance_metrics()
             else:
-                print(f"Node {args.node} not found")
+                storage_util = {}
+                network_util = {}
+                performance = {}
+            
+            print(f"\n{'='*60}")
+            print(f"Node Status: {args.node}")
+            print(f"{'='*60}")
+            print(f"Status:        {'✓ Running' if is_running else '✗ Stopped'}")
+            print(f"Host:          {config.get('host', 'unknown')}")
+            print(f"Port:          {config.get('port', 'unknown')}")
+            
+            if is_running:
+                print(f"\nStorage:")
+                print(f"  Capacity:    {storage_util.get('total_bytes', 0) / (1024**3):.2f} GB")
+                print(f"  Used:        {storage_util.get('used_bytes', 0) / (1024**3):.2f} GB")
+                print(f"  Available:   {(storage_util.get('total_bytes', 0) - storage_util.get('used_bytes', 0)) / (1024**3):.2f} GB")
+                print(f"  Utilization: {storage_util.get('utilization_percent', 0):.2f}%")
+                print(f"  Files:       {storage_util.get('files_stored', 0)}")
+                print(f"  Chunks:      {storage_util.get('chunk_count', 0)}")
+                
+                print(f"\nNetwork:")
+                print(f"  Utilization: {network_util.get('utilization_percent', 0):.2f}%")
+                print(f"  Connections: {len(network_util.get('connections', []))}")
+                
+                print(f"\nPerformance:")
+                print(f"  Transfers:   {performance.get('total_requests_processed', 0)}")
+                print(f"  Failed:      {performance.get('failed_transfers', 0)}")
+                print(f"  Active:      {performance.get('current_active_transfers', 0)}")
         else:
             # Status of all nodes
             stats = self.factory.get_factory_stats()
-            print(f"\nTotal Nodes: {stats['total_nodes']}")
-            print(f"Running: {stats['running_nodes']}")
-            print(f"Stopped: {stats['stopped_nodes']}")
-            print(f"\nNode IDs: {', '.join(stats['node_ids'])}")
+            nodes = self.factory.get_all_nodes()
+            
+            print(f"\n{'='*80}")
+            print(f"System Status Summary")
+            print(f"{'='*80}")
+            print(f"Total Nodes:   {stats['total_nodes']}")
+            print(f"Running:       {stats['running_nodes']}")
+            print(f"Stopped:       {stats['stopped_nodes']}")
+            
+            if nodes:
+                print(f"\n{'Node ID':<15} {'Status':<12} {'Storage %':<12} {'Files':<10} {'Transfers':<10}")
+                print("-" * 80)
+                
+                for node in nodes:
+                    node_id = node.node_id
+                    is_running = node.is_alive() or node.running
+                    status = "✓ Running" if is_running else "✗ Stopped"
+                    
+                    if is_running:
+                        storage_util = node.get_storage_utilization()
+                        performance = node.get_performance_metrics()
+                        storage_pct = f"{storage_util.get('utilization_percent', 0):.2f}%"
+                        files = storage_util.get('files_stored', 0)
+                        transfers = performance.get('total_requests_processed', 0)
+                    else:
+                        storage_pct = "N/A"
+                        files = 0
+                        transfers = 0
+                    
+                    print(f"{node_id:<15} {status:<12} {storage_pct:<12} {files:<10} {transfers:<10}")
     
     def cmd_list(self, args):
         """List nodes command"""
@@ -124,20 +239,44 @@ class CloudSimCLI:
         
         nodes = self.factory.get_all_nodes()
         if not nodes:
-            print("No nodes found")
+            print("No nodes found. Use 'create' command to create nodes.")
             return
         
-        print(f"\n{'Node ID':<15} {'Status':<10} {'Host':<15} {'Port':<10}")
-        print("-" * 50)
-        
-        for node in nodes:
-            node_id = node.node_id
-            is_running = node.is_alive() or node.running
-            status = "Running" if is_running else "Stopped"
-            host = node.host
-            port = node.port
+        if args.verbose:
+            # Detailed list
+            print(f"\n{'='*100}")
+            print(f"{'Node ID':<15} {'Status':<12} {'Host':<15} {'Port':<8} {'CPU':<6} {'Memory':<8} {'Storage':<10} {'Bandwidth':<10}")
+            print("-" * 100)
             
-            print(f"{node_id:<15} {status:<10} {host:<15} {port:<10}")
+            for node in nodes:
+                node_id = node.node_id
+                is_running = node.is_alive() or node.running
+                status = "✓ Running" if is_running else "✗ Stopped"
+                config = self.factory.node_configs.get(node_id, {})
+                
+                host = config.get('host', 'unknown')
+                port = config.get('port', 'unknown')
+                cpu = config.get('cpu_capacity', 0)
+                memory = f"{config.get('memory_capacity', 0)} GB"
+                storage = f"{config.get('storage_capacity', 0)} GB"
+                bandwidth = f"{config.get('bandwidth', 0) / 1000000 if config.get('bandwidth') else 0} Mbps"
+                
+                print(f"{node_id:<15} {status:<12} {host:<15} {port:<8} {cpu:<6} {memory:<8} {storage:<10} {bandwidth:<10}")
+        else:
+            # Simple list
+            print(f"\n{'Node ID':<15} {'Status':<12} {'Host':<15} {'Port':<8}")
+            print("-" * 50)
+            
+            for node in nodes:
+                node_id = node.node_id
+                is_running = node.is_alive() or node.running
+                status = "✓ Running" if is_running else "✗ Stopped"
+                host = node.host
+                port = node.port
+                
+                print(f"{node_id:<15} {status:<12} {host:<15} {port:<8}")
+        
+        print(f"\nTotal: {len(nodes)} node(s)")
     
     def cmd_info(self, args):
         """Info command"""
@@ -148,39 +287,98 @@ class CloudSimCLI:
             # Info for specific node
             node = self.factory.get_node(args.node)
             if not node:
-                print(f"Node {args.node} not found")
-                return
+                print(f"Error: Node '{args.node}' not found")
+                sys.exit(1)
             
             config = self.factory.node_configs.get(args.node, {})
-            storage_util = node.get_storage_utilization() if (node.is_alive() or node.running) else {}
-            network_util = node.get_network_utilization() if (node.is_alive() or node.running) else {}
+            is_running = node.is_alive() or node.running
             
-            print(f"\n=== Node Information: {args.node} ===")
-            print(f"Host: {config.get('host', 'unknown')}")
-            print(f"Port: {config.get('port', 'unknown')}")
-            print(f"Status: {'Running' if (node.is_alive() or node.running) else 'Stopped'}")
-            print(f"\nResources:")
-            print(f"  CPU: {config.get('cpu_capacity', 0)} vCPUs")
-            print(f"  Memory: {config.get('memory_capacity', 0)} GB")
-            print(f"  Storage: {config.get('storage_capacity', 0)} GB")
-            print(f"  Bandwidth: {config.get('bandwidth', 0) / 1000000 if config.get('bandwidth') else 0} Mbps")
-            print(f"\nUtilization:")
-            print(f"  Storage: {storage_util.get('utilization_percent', 0):.2f}%")
-            print(f"  Network: {network_util.get('utilization_percent', 0):.2f}%")
+            if is_running:
+                storage_util = node.get_storage_utilization()
+                network_util = node.get_network_utilization()
+                performance = node.get_performance_metrics()
+            else:
+                storage_util = {}
+                network_util = {}
+                performance = {}
+            
+            print(f"\n{'='*70}")
+            print(f"Node Information: {args.node}")
+            print(f"{'='*70}")
+            
+            print(f"\nBasic Information:")
+            print(f"  Host:        {config.get('host', 'unknown')}")
+            print(f"  Port:        {config.get('port', 'unknown')}")
+            print(f"  Status:      {'✓ Running' if is_running else '✗ Stopped'}")
+            
+            print(f"\nResource Configuration:")
+            print(f"  CPU:         {config.get('cpu_capacity', 0)} vCPUs")
+            print(f"  Memory:      {config.get('memory_capacity', 0)} GB")
+            print(f"  Storage:     {config.get('storage_capacity', 0)} GB")
+            bandwidth_mbps = config.get('bandwidth', 0) / 1000000 if config.get('bandwidth') else 0
+            print(f"  Bandwidth:   {bandwidth_mbps} Mbps")
+            
+            if is_running:
+                print(f"\nStorage Utilization:")
+                total_gb = storage_util.get('total_bytes', 0) / (1024**3)
+                used_gb = storage_util.get('used_bytes', 0) / (1024**3)
+                available_gb = total_gb - used_gb
+                print(f"  Total:       {total_gb:.2f} GB")
+                print(f"  Used:        {used_gb:.2f} GB")
+                print(f"  Available:   {available_gb:.2f} GB")
+                print(f"  Utilization: {storage_util.get('utilization_percent', 0):.2f}%")
+                print(f"  Files:       {storage_util.get('files_stored', 0)}")
+                print(f"  Chunks:      {storage_util.get('chunk_count', 0)}")
+                
+                print(f"\nNetwork Utilization:")
+                print(f"  Utilization: {network_util.get('utilization_percent', 0):.2f}%")
+                connections = network_util.get('connections', [])
+                print(f"  Connections:   {len(connections)}")
+                if connections:
+                    print(f"    {', '.join(connections)}")
+                
+                print(f"\nPerformance Metrics:")
+                print(f"  Total Transfers:    {performance.get('total_requests_processed', 0)}")
+                print(f"  Successful:         {performance.get('total_requests_processed', 0) - performance.get('failed_transfers', 0)}")
+                print(f"  Failed:             {performance.get('failed_transfers', 0)}")
+                print(f"  Active Transfers:   {performance.get('current_active_transfers', 0)}")
+                data_transferred = performance.get('total_data_transferred_bytes', 0) / (1024**3)
+                print(f"  Data Transferred:   {data_transferred:.2f} GB")
         else:
             # System info
             stats = self.factory.get_factory_stats()
             resources = self.factory.get_aggregated_resources()
+            health = self.factory.check_all_nodes_health()
             
-            print(f"\n=== System Information ===")
-            print(f"Total Nodes: {stats['total_nodes']}")
-            print(f"Running Nodes: {stats['running_nodes']}")
+            print(f"\n{'='*70}")
+            print(f"System Information")
+            print(f"{'='*70}")
+            
+            print(f"\nNode Summary:")
+            print(f"  Total Nodes:    {stats['total_nodes']}")
+            print(f"  Running:        {stats['running_nodes']}")
+            print(f"  Stopped:        {stats['stopped_nodes']}")
+            
+            healthy = sum(1 for h in health.values() if h.get('status') == 'running')
+            print(f"  Healthy:        {healthy}")
+            
             print(f"\nTotal Resources:")
-            print(f"  CPU: {resources['total_cpu']} vCPUs")
-            print(f"  Memory: {resources['total_memory_gb']} GB")
-            print(f"  Storage: {resources['total_storage_gb']} GB")
-            print(f"  Bandwidth: {resources['total_bandwidth_mbps']} Mbps")
-            print(f"\nStorage Utilization: {resources['storage_utilization_percent']:.2f}%")
+            print(f"  CPU:            {resources['total_cpu']} vCPUs")
+            print(f"  Memory:         {resources['total_memory_gb']} GB")
+            print(f"  Storage:        {resources['total_storage_gb']} GB")
+            print(f"  Bandwidth:      {resources['total_bandwidth_mbps']} Mbps")
+            
+            print(f"\nStorage Summary:")
+            print(f"  Total:          {resources['total_storage_gb']} GB")
+            print(f"  Used:           {resources['used_storage_gb']} GB")
+            print(f"  Available:      {resources['available_storage_gb']} GB")
+            print(f"  Utilization:    {resources['storage_utilization_percent']:.2f}%")
+            
+            print(f"\nAverages per Node:")
+            print(f"  CPU:            {resources['average_cpu']} vCPUs")
+            print(f"  Memory:         {resources['average_memory_gb']} GB")
+            print(f"  Storage:        {resources['average_storage_gb']} GB")
+            print(f"  Bandwidth:      {resources['average_bandwidth_mbps']} Mbps")
     
     def cmd_create(self, args):
         """Create nodes command"""
@@ -272,6 +470,13 @@ class CloudSimCLI:
         stop_parser.add_argument('--timeout', type=float, default=5.0, help='Shutdown timeout in seconds')
         stop_parser.set_defaults(func=self.cmd_stop)
         
+        # Restart command
+        restart_parser = subparsers.add_parser('restart', help='Restart nodes')
+        restart_parser.add_argument('nodes', nargs='*', help='Node IDs to restart (all if not specified)')
+        restart_parser.add_argument('--graceful', action='store_true', default=True, help='Graceful shutdown before restart')
+        restart_parser.add_argument('--timeout', type=float, default=5.0, help='Shutdown timeout in seconds')
+        restart_parser.set_defaults(func=self.cmd_restart)
+        
         # Status command
         status_parser = subparsers.add_parser('status', help='Show node status')
         status_parser.add_argument('--node', help='Specific node ID')
@@ -279,6 +484,7 @@ class CloudSimCLI:
         
         # List command
         list_parser = subparsers.add_parser('list', help='List all nodes')
+        list_parser.add_argument('--verbose', '-v', action='store_true', help='Show detailed information')
         list_parser.set_defaults(func=self.cmd_list)
         
         # Info command
