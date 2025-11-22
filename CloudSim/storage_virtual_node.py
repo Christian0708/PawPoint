@@ -1,6 +1,7 @@
 import time
 import math
 import os
+import threading
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 from enum import Enum, auto
@@ -30,7 +31,7 @@ class FileTransfer:
     created_at: float = time.time()
     completed_at: Optional[float] = None
 
-class StorageVirtualNode:
+class StorageVirtualNode(threading.Thread):
     def __init__(
         self,
         node_id: str,
@@ -39,6 +40,9 @@ class StorageVirtualNode:
         storage_capacity: int,  # in GB
         bandwidth: int  # in Mbps
     ):
+        # Initialize thread
+        super().__init__(name=f"Node-{node_id}", daemon=True)
+        
         self.node_id = node_id
         self.cpu_capacity = cpu_capacity
         self.memory_capacity = memory_capacity
@@ -59,6 +63,10 @@ class StorageVirtualNode:
         # Network connections (node_id: bandwidth_available)
         self.connections: Dict[str, int] = {}
         
+        # Thread control
+        self.running = False
+        self.stop_event = threading.Event()
+        
         # Create storage directory structure
         self.create_storage_structure()
 
@@ -76,6 +84,35 @@ class StorageVirtualNode:
         self.chunks_path = chunks_path
         
         print(f"[{self.node_id}] Created storage structure at {base_path}")
+
+    def run(self):
+        """
+        Main thread execution method
+        Runs when thread.start() is called
+        Node operates autonomously in this thread
+        """
+        self.running = True
+        print(f"[{self.node_id}] Node thread started")
+        
+        # Main node loop - will be extended in later commits
+        while self.running and not self.stop_event.is_set():
+            try:
+                # Node autonomous operations will be added here
+                # For now, just check stop condition periodically
+                self.stop_event.wait(timeout=1.0)  # Check every second
+            except Exception as e:
+                print(f"[{self.node_id}] Error in node thread: {e}")
+                break
+        
+        print(f"[{self.node_id}] Node thread stopped")
+    
+    def stop(self):
+        """
+        Stop the node thread gracefully
+        """
+        self.running = False
+        self.stop_event.set()
+        print(f"[{self.node_id}] Stop signal sent")
 
     def write_chunk_to_disk(self, file_id: str, chunk_id: int, data: bytes) -> tuple[bool, str]:
         """Write a chunk to disk as a binary file and return checksum"""
