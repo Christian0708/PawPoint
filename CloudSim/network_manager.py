@@ -403,9 +403,64 @@ class NetworkManager:
         """
         Start listening for incoming connections
         This will be run in a separate thread
+        Accepts connections and handles them
         """
-        # Placeholder - will be implemented in next commit
-        pass
+        # Check if listener is initialized
+        if self.server_socket is None:
+            print(f"[NetworkManager-{self.node_id}] Listener not initialized. Call initialize_listener() first")
+            return
+        
+        # Set running flag
+        self.running = True
+        print(f"[NetworkManager-{self.node_id}] Server started, listening on {self.host}:{self.port}")
+        
+        # Main server loop
+        while self.running:
+            try:
+                # Accept incoming connection (with timeout to check running flag)
+                client_socket, client_address = self.server_socket.accept()
+                
+                # Set socket timeout for receiving
+                client_socket.settimeout(30.0)
+                
+                print(f"[NetworkManager-{self.node_id}] Accepted connection from {client_address[0]}:{client_address[1]}")
+                
+                # Handle the connection (will be dispatched in next commit)
+                # For now, just store it temporarily
+                # In next commit, we'll dispatch to appropriate handler
+                self._handle_incoming_connection(client_socket, client_address)
+                
+            except socket.timeout:
+                # Timeout is expected - allows checking self.running flag
+                continue
+            except OSError as e:
+                if self.running:
+                    # Only print error if we're still supposed to be running
+                    print(f"[NetworkManager-{self.node_id}] Error accepting connection: {e}")
+                break
+            except Exception as e:
+                if self.running:
+                    print(f"[NetworkManager-{self.node_id}] Unexpected error in server loop: {e}")
+                break
+        
+        print(f"[NetworkManager-{self.node_id}] Server stopped")
+    
+    def _handle_incoming_connection(self, client_socket: socket.socket, client_address: tuple):
+        """
+        Handle an incoming connection
+        Placeholder - will be implemented in next commit with request dispatcher
+        
+        Args:
+            client_socket: Socket connection from client
+            client_address: Tuple of (host, port) of client
+        """
+        # For now, just close the connection
+        # In next commit, we'll receive messages and dispatch them
+        try:
+            client_socket.close()
+            print(f"[NetworkManager-{self.node_id}] Closed connection from {client_address[0]}:{client_address[1]}")
+        except Exception as e:
+            print(f"[NetworkManager-{self.node_id}] Error closing client connection: {e}")
     
     def stop_server(self):
         """
