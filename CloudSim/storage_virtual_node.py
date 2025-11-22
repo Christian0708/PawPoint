@@ -440,6 +440,33 @@ class StorageVirtualNode(threading.Thread):
         print(f"[{self.node_id}] Submitted chunk {chunk_id} of file {file_id} for async processing")
         return future
 
+    def get_async_transfer_status(self) -> Dict[str, int]:
+        """
+        Get status of asynchronous transfers
+        
+        Returns:
+            Dictionary with counts of pending, running, and completed transfers
+        """
+        pending = 0
+        running = 0
+        completed = 0
+        
+        with self.transfer_lock:
+            for future in self.active_transfer_futures.values():
+                if future.done():
+                    completed += 1
+                elif future.running():
+                    running += 1
+                else:
+                    pending += 1
+        
+        return {
+            "pending": pending,
+            "running": running,
+            "completed": completed,
+            "total": pending + running + completed
+        }
+
     def retrieve_file(
         self,
         file_id: str,
