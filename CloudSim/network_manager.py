@@ -20,6 +20,120 @@ class MessageType(Enum):
     ERROR = "ERROR"
 
 
+class ProtocolMessage:
+    """
+    Factory class for creating protocol-compliant messages
+    All messages are JSON-serializable dictionaries
+    """
+    
+    @staticmethod
+    def create_transfer_request(file_id: str, file_name: str, file_size: int, 
+                               source_node_id: str, num_chunks: int) -> Dict[str, Any]:
+        """Create a file transfer request message"""
+        return {
+            "type": MessageType.TRANSFER_REQUEST.value,
+            "file_id": file_id,
+            "file_name": file_name,
+            "file_size": file_size,
+            "source_node_id": source_node_id,
+            "num_chunks": num_chunks,
+            "timestamp": None  # Will be set when sent
+        }
+    
+    @staticmethod
+    def create_transfer_response(file_id: str, accepted: bool, reason: str = "") -> Dict[str, Any]:
+        """Create a transfer response message"""
+        return {
+            "type": MessageType.TRANSFER_RESPONSE.value,
+            "file_id": file_id,
+            "accepted": accepted,
+            "reason": reason,
+            "timestamp": None
+        }
+    
+    @staticmethod
+    def create_chunk_data(file_id: str, chunk_id: int, chunk_size: int, 
+                         checksum: str) -> Dict[str, Any]:
+        """Create a chunk data message (data sent separately)"""
+        return {
+            "type": MessageType.CHUNK_DATA.value,
+            "file_id": file_id,
+            "chunk_id": chunk_id,
+            "chunk_size": chunk_size,
+            "checksum": checksum,
+            "timestamp": None
+        }
+    
+    @staticmethod
+    def create_chunk_ack(file_id: str, chunk_id: int, success: bool, 
+                        checksum_verified: bool = True) -> Dict[str, Any]:
+        """Create a chunk acknowledgment message"""
+        return {
+            "type": MessageType.CHUNK_ACK.value,
+            "file_id": file_id,
+            "chunk_id": chunk_id,
+            "success": success,
+            "checksum_verified": checksum_verified,
+            "timestamp": None
+        }
+    
+    @staticmethod
+    def create_status_query(query_type: str = "general") -> Dict[str, Any]:
+        """Create a status query message"""
+        return {
+            "type": MessageType.STATUS_QUERY.value,
+            "query_type": query_type,
+            "timestamp": None
+        }
+    
+    @staticmethod
+    def create_status_response(storage_used: int, storage_total: int, 
+                              active_transfers: int, files_stored: int) -> Dict[str, Any]:
+        """Create a status response message"""
+        return {
+            "type": MessageType.STATUS_RESPONSE.value,
+            "storage_used": storage_used,
+            "storage_total": storage_total,
+            "active_transfers": active_transfers,
+            "files_stored": files_stored,
+            "timestamp": None
+        }
+    
+    @staticmethod
+    def create_error(error_code: str, error_message: str) -> Dict[str, Any]:
+        """Create an error message"""
+        return {
+            "type": MessageType.ERROR.value,
+            "error_code": error_code,
+            "error_message": error_message,
+            "timestamp": None
+        }
+    
+    @staticmethod
+    def validate_message(message: Dict[str, Any]) -> bool:
+        """
+        Validate that a message has required fields
+        
+        Args:
+            message: Message dictionary to validate
+            
+        Returns:
+            bool: True if message is valid, False otherwise
+        """
+        if not isinstance(message, dict):
+            return False
+        
+        if "type" not in message:
+            return False
+        
+        # Check if type is valid
+        valid_types = [mt.value for mt in MessageType]
+        if message["type"] not in valid_types:
+            return False
+        
+        return True
+
+
 class NetworkManager:
     """
     Manages network communication between storage nodes
