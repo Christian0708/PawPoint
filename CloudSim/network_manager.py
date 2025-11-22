@@ -279,6 +279,7 @@ class NetworkManager:
             print(f"[NetworkManager-{self.node_id}] Already connected to {target_node_id}")
             return True
         
+        client_socket = None
         try:
             # Create TCP socket
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -301,14 +302,29 @@ class NetworkManager:
             return True
             
         except socket.timeout:
-            print(f"[NetworkManager-{self.node_id}] Connection to {target_node_id} timed out")
+            print(f"[NetworkManager-{self.node_id}] Connection to {target_node_id} timed out after 5 seconds")
             return False
         except ConnectionRefusedError:
             print(f"[NetworkManager-{self.node_id}] Connection refused by {target_node_id} at {target_host}:{target_port}")
             return False
-        except Exception as e:
-            print(f"[NetworkManager-{self.node_id}] Error connecting to {target_node_id}: {e}")
+        except OSError as e:
+            if e.errno == 10061:  # Connection refused (Windows)
+                print(f"[NetworkManager-{self.node_id}] Connection refused by {target_node_id} at {target_host}:{target_port}")
+            elif e.errno == 10060:  # Connection timed out (Windows)
+                print(f"[NetworkManager-{self.node_id}] Connection to {target_node_id} timed out")
+            else:
+                print(f"[NetworkManager-{self.node_id}] OS error connecting to {target_node_id}: {e}")
             return False
+        except Exception as e:
+            print(f"[NetworkManager-{self.node_id}] Unexpected error connecting to {target_node_id}: {e}")
+            return False
+        finally:
+            # Clean up socket if connection failed
+            if target_node_id not in self.connections and client_socket is not None:
+                try:
+                    client_socket.close()
+                except:
+                    pass
     
     def send_message(self, target_node_id: str, message: Dict[str, Any]) -> bool:
         """
@@ -362,11 +378,22 @@ class NetworkManager:
             return True
             
         except BrokenPipeError:
-            print(f"[NetworkManager-{self.node_id}] Connection to {target_node_id} broken")
+            print(f"[NetworkManager-{self.node_id}] Connection to {target_node_id} broken (pipe broken)")
             self.close_connection(target_node_id)
             return False
+        except ConnectionResetError:
+            print(f"[NetworkManager-{self.node_id}] Connection to {target_node_id} reset by peer")
+            self.close_connection(target_node_id)
+            return False
+        except OSError as e:
+            print(f"[NetworkManager-{self.node_id}] OS error sending message to {target_node_id}: {e}")
+            self.close_connection(target_node_id)
+            return False
+        except socket.timeout:
+            print(f"[NetworkManager-{self.node_id}] Timeout sending message to {target_node_id}")
+            return False
         except Exception as e:
-            print(f"[NetworkManager-{self.node_id}] Error sending message to {target_node_id}: {e}")
+            print(f"[NetworkManager-{self.node_id}] Unexpected error sending message to {target_node_id}: {e}")
             return False
     
     def receive_message(self, connection: socket.socket) -> Optional[Dict[str, Any]]:
@@ -414,8 +441,20 @@ class NetworkManager:
         except json.JSONDecodeError as e:
             print(f"[NetworkManager-{self.node_id}] JSON decode error: {e}")
             return None
+        except ConnectionResetError:
+            print(f"[NetworkManager-{self.node_id}] Connection reset by peer while receiving")
+            return None
+        except BrokenPipeError:
+            print(f"[NetworkManager-{self.node_id}] Broken pipe while receiving message")
+            return None
+        except OSError as e:
+            print(f"[NetworkManager-{self.node_id}] OS error receiving message: {e}")
+            return None
+        except ValueError as e:
+            print(f"[NetworkManager-{self.node_id}] Value error parsing message: {e}")
+            return None
         except Exception as e:
-            print(f"[NetworkManager-{self.node_id}] Error receiving message: {e}")
+            print(f"[NetworkManager-{self.node_id}] Unexpected error receiving message: {e}")
             return None
     
     def _receive_exact(self, connection: socket.socket, num_bytes: int) -> Optional[bytes]:
@@ -442,10 +481,19 @@ class NetworkManager:
                 data += chunk
                 bytes_remaining -= len(chunk)
             except socket.timeout:
-                print(f"[NetworkManager-{self.node_id}] Receive timeout")
+                print(f"[NetworkManager-{self.node_id}] Receive timeout after {num_bytes} bytes")
+                return None
+            except ConnectionResetError:
+                print(f"[NetworkManager-{self.node_id}] Connection reset while receiving {num_bytes} bytes")
+                return None
+            except BrokenPipeError:
+                print(f"[NetworkManager-{self.node_id}] Broken pipe while receiving {num_bytes} bytes")
+                return None
+            except OSError as e:
+                print(f"[NetworkManager-{self.node_id}] OS error receiving {num_bytes} bytes: {e}")
                 return None
             except Exception as e:
-                print(f"[NetworkManager-{self.node_id}] Receive error: {e}")
+                print(f"[NetworkManager-{self.node_id}] Unexpected error receiving {num_bytes} bytes: {e}")
                 return None
         
         return data
@@ -563,12 +611,22 @@ class NetworkManager:
             if not handled:
                 print(f"[NetworkManager-{self.node_id}] Message from {client_address[0]}:{client_address[1]} was not handled")
             
+        except ConnectionResetError:
+            print(f"[NetworkManager-{self.node_id}] Connection reset by {client_address[0]}:{client_address[1]}")
+        except BrokenPipeError:
+            print(f"[NetworkManager-{self.node_id}] Broken pipe with {client_address[0]}:{client_address[1]}")
+        except socket.timeout:
+            print(f"[NetworkManager-{self.node_id}] Timeout handling connection from {client_address[0]}:{client_address[1]}")
+        except OSError as e:
+            print(f"[NetworkManager-{self.node_id}] OS error handling connection from {client_address[0]}:{client_address[1]}: {e}")
         except Exception as e:
-            print(f"[NetworkManager-{self.node_id}] Error handling connection from {client_address[0]}:{client_address[1]}: {e}")
+            print(f"[NetworkManager-{self.node_id}] Unexpected error handling connection from {client_address[0]}:{client_address[1]}: {e}")
         finally:
             # Close the connection after handling
             try:
                 client_socket.close()
+            except ConnectionResetError:
+                pass  # Already closed
             except Exception as e:
                 print(f"[NetworkManager-{self.node_id}] Error closing client connection: {e}")
     
