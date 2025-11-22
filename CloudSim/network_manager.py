@@ -55,7 +55,7 @@ class NetworkManager:
     
     def connect_to_node(self, target_node_id: str, target_host: str, target_port: int) -> bool:
         """
-        Establish a connection to another node
+        Establish a TCP connection to another node
         
         Args:
             target_node_id: ID of the node to connect to
@@ -65,8 +65,41 @@ class NetworkManager:
         Returns:
             bool: True if connection successful, False otherwise
         """
-        # Placeholder - will be implemented in next commit
-        pass
+        # Check if already connected
+        if target_node_id in self.connections:
+            print(f"[NetworkManager-{self.node_id}] Already connected to {target_node_id}")
+            return True
+        
+        try:
+            # Create TCP socket
+            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            
+            # Set socket options
+            client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Set timeout for connection attempt
+            client_socket.settimeout(5.0)
+            
+            # Attempt to connect
+            print(f"[NetworkManager-{self.node_id}] Connecting to {target_node_id} at {target_host}:{target_port}...")
+            client_socket.connect((target_host, target_port))
+            
+            # Connection successful
+            self.connections[target_node_id] = client_socket
+            self.node_addresses[target_node_id] = (target_host, target_port)
+            
+            print(f"[NetworkManager-{self.node_id}] Successfully connected to {target_node_id}")
+            return True
+            
+        except socket.timeout:
+            print(f"[NetworkManager-{self.node_id}] Connection to {target_node_id} timed out")
+            return False
+        except ConnectionRefusedError:
+            print(f"[NetworkManager-{self.node_id}] Connection refused by {target_node_id} at {target_host}:{target_port}")
+            return False
+        except Exception as e:
+            print(f"[NetworkManager-{self.node_id}] Error connecting to {target_node_id}: {e}")
+            return False
     
     def send_message(self, target_node_id: str, message: Dict[str, Any]) -> bool:
         """
