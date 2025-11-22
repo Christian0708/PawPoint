@@ -458,6 +458,256 @@ class NodeFactory:
             "total_reserved": len(self.reserved_ports)
         }
     
+    def create_nodes_batch(
+        self,
+        node_configs: List[Dict],
+        start_port: Optional[int] = None
+    ) -> List[StorageVirtualNode]:
+        """
+        Create multiple nodes from a list of configuration dictionaries
+        
+        Args:
+            node_configs: List of node configuration dictionaries
+            start_port: Optional starting port for auto-assignment (uses factory default if None)
+            
+        Returns:
+            List of successfully created StorageVirtualNode instances
+        """
+        created_nodes = []
+        failed_nodes = []
+        
+        print(f"[NodeFactory] Creating {len(node_configs)} nodes in batch...")
+        
+        for node_config in node_configs:
+            if not isinstance(node_config, dict):
+                print(f"[NodeFactory] Skipping invalid node config (not a dict)")
+                failed_nodes.append(node_config)
+                continue
+            
+            # Validate configuration
+            if not self.validate_node_config(node_config):
+                node_id = node_config.get("id", "unknown")
+                print(f"[NodeFactory] Skipping invalid node: {node_id}")
+                failed_nodes.append(node_config)
+                continue
+            
+            # Extract configuration values
+            node_id = node_config["id"]
+            cpu_capacity = node_config["cpu_capacity"]
+            memory_gb = node_config["memory_gb"]
+            storage_gb = node_config["storage_gb"]
+            bandwidth_mbps = node_config["bandwidth_mbps"]
+            host = node_config.get("host", "localhost")
+            port = node_config.get("port", None)
+            
+            # Create the node
+            node = self.create_node(
+                node_id=node_id,
+                cpu_capacity=cpu_capacity,
+                memory_capacity=memory_gb,
+                storage_capacity=storage_gb,
+                bandwidth=bandwidth_mbps,
+                host=host,
+                port=port
+            )
+            
+            if node:
+                created_nodes.append(node)
+            else:
+                failed_nodes.append(node_config)
+        
+        print(f"[NodeFactory] Batch creation complete: {len(created_nodes)} succeeded, {len(failed_nodes)} failed")
+        return created_nodes
+    
+    def remove_nodes_batch(self, node_ids: List[str], graceful: bool = True, timeout: float = 5.0) -> Dict[str, bool]:
+        """
+        Remove multiple nodes at once
+        
+        Args:
+            node_ids: List of node IDs to remove
+            graceful: If True, wait for operations to complete
+            timeout: Maximum time to wait for graceful shutdown
+            
+        Returns:
+            Dictionary mapping node_id to removal success status
+        """
+        results = {}
+        
+        print(f"[NodeFactory] Removing {len(node_ids)} nodes in batch...")
+        
+        for node_id in node_ids:
+            results[node_id] = self.remove_node(node_id)
+        
+        success_count = sum(1 for success in results.values() if success)
+        print(f"[NodeFactory] Batch removal complete: {success_count}/{len(node_ids)} succeeded")
+        
+        return results
+    
+    def get_nodes_by_status(self, running: bool = True) -> List[StorageVirtualNode]:
+        """
+        Get nodes filtered by running status
+        
+        Args:
+            running: If True, return running nodes; if False, return stopped nodes
+            
+        Returns:
+            List of nodes matching the status
+        """
+        filtered = []
+        for node in self.nodes.values():
+            is_running = node.is_alive() or node.running
+            if (running and is_running) or (not running and not is_running):
+                filtered.append(node)
+        return filtered
+    
+    def get_nodes_by_host(self, host: str) -> List[StorageVirtualNode]:
+        """
+        Get all nodes running on a specific host
+        
+        Args:
+            host: Host address to filter by
+            
+        Returns:
+            List of nodes on the specified host
+        """
+        filtered = []
+        for node_id, config in self.node_configs.items():
+            if config.get("host") == host:
+                filtered.append(self.nodes[node_id])
+        return filtered
+    
+    def get_aggregated_resources(self) -> Dict:
+        """
+        Get aggregated resource statistics across all nodes
+        
+        Returns:
+            Dictionary with total capacity, used resources, and averages
+        """
+        if not self.nodes:
+            return {
+                "total_nodes": 0,
+                "total_cpu": 0,
+                "total_memory_gb": 0,
+                "total_storage_gb": 0,
+                "total_bandwidth_mbps": 0,
+                "used_storage_gb": 0,
+                "available_storage_gb": 0,
+                "storage_utilization_percent": 0.0,
+                "average_cpu": 0,
+                "average_memory_gb": 0,
+                "average_storage_gb": 0,
+                "average_bandwidth_mbps": 0
+            }
+        
+        total_cpu = 0
+        total_memory = 0
+        total_storage = 0
+        total_bandwidth = 0
+        used_storage = 0
+        
+        for node_id, config in self.node_configs.items():
+            total_cpu += config.get("cpu_capacity", 0)
+            total_memory += config.get("memory_capacity", 0)
+            total_storage += config.get("storage_capacity", 0)
+            total_bandwidth += config.get("bandwidth", 0)
+            
+            # Get actual used storage from node
+            node = self.nodes[node_id]
+            try:
+                storage_util = node.get_storage_utilization()
+                used_storage += storage_util.get("used_bytes", 0) / (1024 ** 3)  # Convert to GB
+            except Exception:
+                pass
+        
+        node_count = len(self.nodes)
+        available_storage = total_storage - used_storage
+        storage_utilization = (used_storage / total_storage * 100) if total_storage > 0 else 0.0
+        
+        return {
+            "total_nodes": node_count,
+            "total_cpu": total_cpu,
+            "total_memory_gb": total_memory,
+            "total_storage_gb": total_storage,
+            "total_bandwidth_mbps": total_bandwidth,
+            "used_storage_gb": round(used_storage, 2),
+            "available_storage_gb": round(available_storage, 2),
+            "storage_utilization_percent": round(storage_utilization, 2),
+            "average_cpu": round(total_cpu / node_count, 2) if node_count > 0 else 0,
+            "average_memory_gb": round(total_memory / node_count, 2) if node_count > 0 else 0,
+            "average_storage_gb": round(total_storage / node_count, 2) if node_count > 0 else 0,
+            "average_bandwidth_mbps": round(total_bandwidth / node_count, 2) if node_count > 0 else 0
+        }
+    
+    def check_all_nodes_health(self) -> Dict[str, Dict]:
+        """
+        Check health status of all nodes
+        
+        Returns:
+            Dictionary mapping node_id to health status information
+        """
+        health_status = {}
+        
+        for node_id, node in self.nodes.items():
+            try:
+                is_running = node.is_alive() or node.running
+                storage_util = node.get_storage_utilization() if is_running else {}
+                performance = node.get_performance_metrics() if is_running else {}
+                
+                health_status[node_id] = {
+                    "status": "running" if is_running else "stopped",
+                    "is_alive": is_running,
+                    "storage_used_bytes": storage_util.get("used_bytes", 0),
+                    "storage_capacity_bytes": storage_util.get("capacity_bytes", 0),
+                    "active_transfers": len(node.active_transfers) if hasattr(node, "active_transfers") else 0,
+                    "total_transfers": performance.get("total_transfers", 0) if performance else 0,
+                    "host": self.node_configs[node_id].get("host", "unknown"),
+                    "port": self.node_configs[node_id].get("port", "unknown")
+                }
+            except Exception as e:
+                health_status[node_id] = {
+                    "status": "error",
+                    "error": str(e)
+                }
+        
+        return health_status
+    
+    def restart_all_nodes(self, graceful: bool = True, timeout: float = 5.0):
+        """
+        Restart all nodes (stop then start)
+        
+        Args:
+            graceful: If True, wait for operations to complete before stopping
+            timeout: Maximum time to wait for graceful shutdown
+        """
+        print(f"[NodeFactory] Restarting {len(self.nodes)} nodes...")
+        self.stop_all_nodes(graceful=graceful, timeout=timeout)
+        self.start_all_nodes()
+        print(f"[NodeFactory] Restart complete")
+    
+    def get_nodes_summary(self) -> Dict:
+        """
+        Get a comprehensive summary of all nodes
+        
+        Returns:
+            Dictionary with node summaries, resource totals, and health status
+        """
+        running_nodes = self.get_nodes_by_status(running=True)
+        stopped_nodes = self.get_nodes_by_status(running=False)
+        resources = self.get_aggregated_resources()
+        health = self.check_all_nodes_health()
+        
+        return {
+            "factory_stats": self.get_factory_stats(),
+            "resource_summary": resources,
+            "health_summary": {
+                "healthy_nodes": sum(1 for h in health.values() if h.get("status") == "running"),
+                "stopped_nodes": sum(1 for h in health.values() if h.get("status") == "stopped"),
+                "error_nodes": sum(1 for h in health.values() if h.get("status") == "error")
+            },
+            "node_details": health,
+            "port_info": self.get_port_info()
+        }
+    
     def __repr__(self):
         """String representation of NodeFactory"""
         return f"NodeFactory(nodes={len(self.nodes)})"
