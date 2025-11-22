@@ -5,6 +5,7 @@ Manages socket connections and facilitates data transfer operations
 
 import socket
 import json
+import time
 from typing import Optional, Dict, Any
 from enum import Enum
 
@@ -217,7 +218,8 @@ class NetworkManager:
     
     def send_message(self, target_node_id: str, message: Dict[str, Any]) -> bool:
         """
-        Send a message to a connected node
+        Send a JSON message to a connected node over TCP socket
+        Uses length-prefixed protocol: 4-byte header + JSON data
         
         Args:
             target_node_id: ID of the node to send message to
@@ -226,8 +228,52 @@ class NetworkManager:
         Returns:
             bool: True if message sent successfully, False otherwise
         """
-        # Placeholder - will be implemented in later commit
-        pass
+        # Check if connected to target node
+        if target_node_id not in self.connections:
+            print(f"[NetworkManager-{self.node_id}] Not connected to {target_node_id}")
+            return False
+        
+        # Validate message
+        if not ProtocolMessage.validate_message(message):
+            print(f"[NetworkManager-{self.node_id}] Invalid message format")
+            return False
+        
+        try:
+            # Add timestamp
+            message["timestamp"] = time.time()
+            
+            # Add sender information
+            message["sender_node_id"] = self.node_id
+            
+            # Serialize message to JSON
+            json_data = json.dumps(message)
+            json_bytes = json_data.encode('utf-8')
+            
+            # Calculate message length
+            message_length = len(json_bytes)
+            
+            # Send message length first (4 bytes, big-endian)
+            length_header = message_length.to_bytes(4, byteorder='big')
+            
+            # Get socket connection
+            sock = self.connections[target_node_id]
+            
+            # Send length header
+            sock.sendall(length_header)
+            
+            # Send actual message
+            sock.sendall(json_bytes)
+            
+            print(f"[NetworkManager-{self.node_id}] Sent {message['type']} to {target_node_id} ({message_length} bytes)")
+            return True
+            
+        except BrokenPipeError:
+            print(f"[NetworkManager-{self.node_id}] Connection to {target_node_id} broken")
+            self.close_connection(target_node_id)
+            return False
+        except Exception as e:
+            print(f"[NetworkManager-{self.node_id}] Error sending message to {target_node_id}: {e}")
+            return False
     
     def receive_message(self, connection: socket.socket) -> Optional[Dict[str, Any]]:
         """
