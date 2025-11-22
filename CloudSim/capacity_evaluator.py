@@ -3,11 +3,42 @@ CapacityEvaluator - Evaluates capacity and resource utilization across the stora
 Provides insights into current usage, available capacity, and capacity planning
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Callable
 from datetime import datetime, timedelta
 import time
+from enum import Enum
+from dataclasses import dataclass, field
 from node_factory import NodeFactory
 from storage_virtual_node import StorageVirtualNode
+
+
+class AlertLevel(Enum):
+    """Alert severity levels"""
+    INFO = "INFO"
+    WARNING = "WARNING"
+    CRITICAL = "CRITICAL"
+
+
+@dataclass
+class CapacityThreshold:
+    """Represents a capacity threshold configuration"""
+    threshold_percent: float
+    alert_level: AlertLevel
+    description: str = ""
+    enabled: bool = True
+
+
+@dataclass
+class CapacityAlert:
+    """Represents a capacity alert"""
+    alert_id: str
+    timestamp: datetime
+    level: AlertLevel
+    node_id: Optional[str]
+    threshold_percent: float
+    current_utilization_percent: float
+    message: str
+    details: Dict = field(default_factory=dict)
 
 
 class CapacityEvaluator:
@@ -25,6 +56,31 @@ class CapacityEvaluator:
         """
         self.node_factory = node_factory
         self.capacity_history: List[Dict] = []  # Historical capacity snapshots
+        
+        # Threshold configuration {node_id: [CapacityThreshold]} or "global": [CapacityThreshold]
+        self.thresholds: Dict[str, List[CapacityThreshold]] = {
+            "global": [
+                CapacityThreshold(50.0, AlertLevel.INFO, "Storage utilization reached 50%"),
+                CapacityThreshold(75.0, AlertLevel.WARNING, "Storage utilization reached 75%"),
+                CapacityThreshold(90.0, AlertLevel.CRITICAL, "Storage utilization reached 90%"),
+                CapacityThreshold(95.0, AlertLevel.CRITICAL, "Storage utilization reached 95%")
+            ]
+        }
+        
+        # Alert history
+        self.alert_history: List[CapacityAlert] = []
+        self.max_alert_history = 1000  # Keep last 1000 alerts
+        
+        # Track which thresholds have been triggered (to avoid duplicate alerts)
+        self.triggered_thresholds: Dict[str, set] = {}  # {node_id: set of threshold_percent}
+        
+        # Alert callbacks {AlertLevel: [callable]}
+        self.alert_callbacks: Dict[AlertLevel, List[Callable]] = {
+            AlertLevel.INFO: [],
+            AlertLevel.WARNING: [],
+            AlertLevel.CRITICAL: []
+        }
+        
         print("[CapacityEvaluator] Initialized")
     
     def set_node_factory(self, node_factory: NodeFactory):
@@ -215,10 +271,13 @@ class CapacityEvaluator:
         
         return summary
     
-    def take_capacity_snapshot(self) -> Dict:
+    def take_capacity_snapshot(self, check_thresholds: bool = True) -> Dict:
         """
         Take a snapshot of current capacity state for historical tracking
         
+        Args:
+            check_thresholds: If True, automatically check thresholds and generate alerts
+            
         Returns:
             Dictionary with capacity snapshot
         """
@@ -233,6 +292,12 @@ class CapacityEvaluator:
         # Keep only last 100 snapshots to prevent memory bloat
         if len(self.capacity_history) > 100:
             self.capacity_history = self.capacity_history[-100:]
+        
+        # Check thresholds if requested
+        if check_thresholds:
+            alerts = self.check_thresholds()
+            if alerts:
+                snapshot["alerts_generated"] = len(alerts)
         
         return snapshot
     
@@ -531,9 +596,317 @@ class CapacityEvaluator:
         
         return trends
     
+    def add_threshold(
+        self,
+        threshold_percent: float,
+        alert_level: AlertLevel,
+        description: str = "",
+        node_id: Optional[str] = None
+    ):
+        """
+        Add a capacity threshold
+        
+        Args:
+            threshold_percent: Utilization percentage threshold
+            alert_level: Alert level when threshold is reached
+            description: Description of the threshold
+            node_id: Specific node ID, or None for global threshold
+        """
+        key = node_id if node_id else "global"
+        if key not in self.thresholds:
+            self.thresholds[key] = []
+        
+        threshold = CapacityThreshold(threshold_percent, alert_level, description)
+        self.thresholds[key].append(threshold)
+        
+        # Sort thresholds by percentage
+        self.thresholds[key].sort(key=lambda t: t.threshold_percent)
+        
+        print(f"[CapacityEvaluator] Added {alert_level.value} threshold at {threshold_percent}% for {key}")
+    
+    def remove_threshold(self, threshold_percent: float, node_id: Optional[str] = None) -> bool:
+        """
+        Remove a capacity threshold
+        
+        Args:
+            threshold_percent: Threshold percentage to remove
+            node_id: Specific node ID, or None for global threshold
+            
+        Returns:
+            True if threshold was removed, False if not found
+        """
+        key = node_id if node_id else "global"
+        if key not in self.thresholds:
+            return False
+        
+        original_count = len(self.thresholds[key])
+        self.thresholds[key] = [
+            t for t in self.thresholds[key]
+            if t.threshold_percent != threshold_percent
+        ]
+        
+        removed = len(self.thresholds[key]) < original_count
+        if removed:
+            print(f"[CapacityEvaluator] Removed threshold at {threshold_percent}% for {key}")
+        
+        return removed
+    
+    def check_thresholds(self, node_id: Optional[str] = None) -> List[CapacityAlert]:
+        """
+        Check current utilization against configured thresholds and generate alerts
+        
+        Args:
+            node_id: Specific node ID to check, or None for all nodes
+            
+        Returns:
+            List of generated alerts
+        """
+        alerts = []
+        
+        if not self.node_factory:
+            return alerts
+        
+        # Get nodes to check
+        if node_id:
+            nodes_to_check = [node_id]
+        else:
+            nodes_to_check = list(self.node_factory.node_configs.keys())
+            nodes_to_check.append(None)  # Add global check
+        
+        for check_node_id in nodes_to_check:
+            # Get utilization
+            if check_node_id:
+                node_capacity = self.evaluate_node_capacity(check_node_id)
+                if not node_capacity:
+                    continue
+                utilization_percent = node_capacity.get("storage", {}).get("utilization_percent", 0)
+            else:
+                total_capacity = self.evaluate_total_capacity()
+                utilization_percent = total_capacity.get("storage_capacity", {}).get("utilization_percent", 0)
+            
+            # Get thresholds for this node/global
+            key = check_node_id if check_node_id else "global"
+            thresholds = self.thresholds.get(key, [])
+            
+            # Check each threshold
+            for threshold in thresholds:
+                if not threshold.enabled:
+                    continue
+                
+                # Check if threshold is crossed
+                if utilization_percent >= threshold.threshold_percent:
+                    # Check if we've already alerted for this threshold
+                    threshold_key = f"{key}:{threshold.threshold_percent}"
+                    if key not in self.triggered_thresholds:
+                        self.triggered_thresholds[key] = set()
+                    
+                    if threshold_key not in self.triggered_thresholds[key]:
+                        # Generate alert
+                        alert = self._create_alert(
+                            threshold=threshold,
+                            node_id=check_node_id,
+                            utilization_percent=utilization_percent
+                        )
+                        alerts.append(alert)
+                        
+                        # Mark threshold as triggered
+                        self.triggered_thresholds[key].add(threshold_key)
+                        
+                        # Call registered callbacks
+                        self._trigger_alert_callbacks(alert)
+                else:
+                    # Utilization dropped below threshold, reset trigger
+                    threshold_key = f"{key}:{threshold.threshold_percent}"
+                    if key in self.triggered_thresholds:
+                        self.triggered_thresholds[key].discard(threshold_key)
+        
+        return alerts
+    
+    def _create_alert(
+        self,
+        threshold: CapacityThreshold,
+        node_id: Optional[str],
+        utilization_percent: float
+    ) -> CapacityAlert:
+        """Create a capacity alert"""
+        alert_id = f"{node_id or 'global'}_{threshold.threshold_percent}_{datetime.now().timestamp()}"
+        
+        message = threshold.description or f"Storage utilization ({utilization_percent:.2f}%) reached threshold ({threshold.threshold_percent}%)"
+        if node_id:
+            message = f"[{node_id}] {message}"
+        
+        alert = CapacityAlert(
+            alert_id=alert_id,
+            timestamp=datetime.now(),
+            level=threshold.alert_level,
+            node_id=node_id,
+            threshold_percent=threshold.threshold_percent,
+            current_utilization_percent=utilization_percent,
+            message=message,
+            details={
+                "threshold_description": threshold.description
+            }
+        )
+        
+        # Add to alert history
+        self.alert_history.append(alert)
+        
+        # Keep only last N alerts
+        if len(self.alert_history) > self.max_alert_history:
+            self.alert_history = self.alert_history[-self.max_alert_history:]
+        
+        return alert
+    
+    def _trigger_alert_callbacks(self, alert: CapacityAlert):
+        """Trigger registered callbacks for an alert"""
+        callbacks = self.alert_callbacks.get(alert.level, [])
+        for callback in callbacks:
+            try:
+                callback(alert)
+            except Exception as e:
+                print(f"[CapacityEvaluator] Error in alert callback: {e}")
+    
+    def register_alert_callback(self, alert_level: AlertLevel, callback: Callable[[CapacityAlert], None]):
+        """
+        Register a callback function to be called when an alert is generated
+        
+        Args:
+            alert_level: Alert level to register callback for
+            callback: Function that takes a CapacityAlert as parameter
+        """
+        if alert_level not in self.alert_callbacks:
+            self.alert_callbacks[alert_level] = []
+        
+        self.alert_callbacks[alert_level].append(callback)
+        print(f"[CapacityEvaluator] Registered callback for {alert_level.value} alerts")
+    
+    def get_alert_history(
+        self,
+        node_id: Optional[str] = None,
+        alert_level: Optional[AlertLevel] = None,
+        limit: Optional[int] = None
+    ) -> List[CapacityAlert]:
+        """
+        Get alert history
+        
+        Args:
+            node_id: Filter by node ID, or None for all
+            alert_level: Filter by alert level, or None for all
+            limit: Maximum number of alerts to return
+            
+        Returns:
+            List of alerts
+        """
+        alerts = self.alert_history
+        
+        # Filter by node_id
+        if node_id is not None:
+            alerts = [a for a in alerts if a.node_id == node_id]
+        
+        # Filter by alert level
+        if alert_level is not None:
+            alerts = [a for a in alerts if a.level == alert_level]
+        
+        # Sort by timestamp (newest first)
+        alerts.sort(key=lambda a: a.timestamp, reverse=True)
+        
+        # Apply limit
+        if limit:
+            alerts = alerts[:limit]
+        
+        return alerts
+    
+    def generate_capacity_report(
+        self,
+        include_predictions: bool = True,
+        include_alerts: bool = True,
+        include_history: bool = False
+    ) -> Dict:
+        """
+        Generate a comprehensive capacity report
+        
+        Args:
+            include_predictions: Include prediction data
+            include_alerts: Include recent alerts
+            include_history: Include historical trends
+            
+        Returns:
+            Dictionary with comprehensive capacity report
+        """
+        if not self.node_factory:
+            return {"error": "No NodeFactory set"}
+        
+        report = {
+            "report_timestamp": datetime.now().isoformat(),
+            "summary": self.get_capacity_summary(),
+            "total_capacity": self.evaluate_total_capacity(),
+            "nodes_capacity": self.evaluate_all_nodes_capacity()
+        }
+        
+        # Add predictions
+        if include_predictions:
+            report["predictions"] = {
+                "overall": self.get_storage_trends(),
+                "time_to_full": self.predict_time_to_capacity()
+            }
+            
+            # Add node-specific predictions
+            node_predictions = {}
+            for node_id in self.node_factory.node_configs.keys():
+                node_predictions[node_id] = self.get_storage_trends(node_id=node_id)
+            report["predictions"]["nodes"] = node_predictions
+        
+        # Add alerts
+        if include_alerts:
+            recent_alerts = self.get_alert_history(limit=50)
+            report["alerts"] = {
+                "recent": [
+                    {
+                        "alert_id": a.alert_id,
+                        "timestamp": a.timestamp.isoformat(),
+                        "level": a.level.value,
+                        "node_id": a.node_id,
+                        "message": a.message,
+                        "utilization_percent": a.current_utilization_percent,
+                        "threshold_percent": a.threshold_percent
+                    }
+                    for a in recent_alerts
+                ],
+                "summary": {
+                    "total_alerts": len(self.alert_history),
+                    "critical_count": len([a for a in self.alert_history if a.level == AlertLevel.CRITICAL]),
+                    "warning_count": len([a for a in self.alert_history if a.level == AlertLevel.WARNING]),
+                    "info_count": len([a for a in self.alert_history if a.level == AlertLevel.INFO])
+                }
+            }
+        
+        # Add history summary
+        if include_history:
+            report["history"] = {
+                "snapshot_count": len(self.capacity_history),
+                "latest_snapshot": self.capacity_history[-1] if self.capacity_history else None
+            }
+        
+        # Add threshold configuration
+        report["thresholds"] = {
+            key: [
+                {
+                    "threshold_percent": t.threshold_percent,
+                    "alert_level": t.alert_level.value,
+                    "description": t.description,
+                    "enabled": t.enabled
+                }
+                for t in thresholds
+            ]
+            for key, thresholds in self.thresholds.items()
+        }
+        
+        return report
+    
     def __repr__(self):
         """String representation of CapacityEvaluator"""
         node_count = self.node_factory.get_node_count() if self.node_factory else 0
         history_count = len(self.capacity_history)
-        return f"CapacityEvaluator(nodes={node_count}, history_snapshots={history_count})"
+        alert_count = len(self.alert_history)
+        return f"CapacityEvaluator(nodes={node_count}, history={history_count}, alerts={alert_count})"
 
