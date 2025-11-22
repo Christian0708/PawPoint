@@ -277,7 +277,8 @@ class NetworkManager:
     
     def receive_message(self, connection: socket.socket) -> Optional[Dict[str, Any]]:
         """
-        Receive and parse a message from a connection
+        Receive and parse a JSON message from a TCP socket connection
+        Uses length-prefixed protocol: 4-byte header + JSON data
         
         Args:
             connection: Socket connection to receive from
@@ -285,8 +286,75 @@ class NetworkManager:
         Returns:
             Dict containing parsed message, or None if error
         """
-        # Placeholder - will be implemented in later commit
-        pass
+        try:
+            # First, receive the 4-byte length header
+            length_header = self._receive_exact(connection, 4)
+            if length_header is None:
+                return None
+            
+            # Parse message length
+            message_length = int.from_bytes(length_header, byteorder='big')
+            
+            # Validate reasonable message length (max 100MB)
+            if message_length > 100 * 1024 * 1024:
+                print(f"[NetworkManager-{self.node_id}] Message too large: {message_length} bytes")
+                return None
+            
+            # Receive the actual message data
+            json_bytes = self._receive_exact(connection, message_length)
+            if json_bytes is None:
+                return None
+            
+            # Decode and parse JSON
+            json_data = json_bytes.decode('utf-8')
+            message = json.loads(json_data)
+            
+            # Validate message structure
+            if not ProtocolMessage.validate_message(message):
+                print(f"[NetworkManager-{self.node_id}] Received invalid message")
+                return None
+            
+            print(f"[NetworkManager-{self.node_id}] Received {message['type']} from {message.get('sender_node_id', 'unknown')} ({message_length} bytes)")
+            return message
+            
+        except json.JSONDecodeError as e:
+            print(f"[NetworkManager-{self.node_id}] JSON decode error: {e}")
+            return None
+        except Exception as e:
+            print(f"[NetworkManager-{self.node_id}] Error receiving message: {e}")
+            return None
+    
+    def _receive_exact(self, connection: socket.socket, num_bytes: int) -> Optional[bytes]:
+        """
+        Receive exactly num_bytes from socket connection
+        Handles partial receives by looping until all bytes received
+        
+        Args:
+            connection: Socket to receive from
+            num_bytes: Exact number of bytes to receive
+            
+        Returns:
+            bytes: Received data, or None if connection closed/error
+        """
+        data = b''
+        bytes_remaining = num_bytes
+        
+        while bytes_remaining > 0:
+            try:
+                chunk = connection.recv(min(bytes_remaining, 4096))
+                if not chunk:
+                    # Connection closed
+                    return None
+                data += chunk
+                bytes_remaining -= len(chunk)
+            except socket.timeout:
+                print(f"[NetworkManager-{self.node_id}] Receive timeout")
+                return None
+            except Exception as e:
+                print(f"[NetworkManager-{self.node_id}] Receive error: {e}")
+                return None
+        
+        return data
     
     def start_server(self):
         """
