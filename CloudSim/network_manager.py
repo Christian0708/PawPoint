@@ -356,20 +356,76 @@ class NetworkManager:
         
         return data
     
+    def initialize_listener(self) -> bool:
+        """
+        Initialize and bind the server socket for listening
+        Must be called before start_server()
+        
+        Returns:
+            bool: True if initialization successful, False otherwise
+        """
+        if self.server_socket is not None:
+            print(f"[NetworkManager-{self.node_id}] Listener already initialized")
+            return True
+        
+        try:
+            # Create TCP socket
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            
+            # Set socket options
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Set socket timeout (for checking self.running flag)
+            self.server_socket.settimeout(1.0)
+            
+            # Bind to host and port
+            self.server_socket.bind((self.host, self.port))
+            
+            # Start listening (backlog of 5 pending connections)
+            self.server_socket.listen(5)
+            
+            print(f"[NetworkManager-{self.node_id}] Listener initialized and bound to {self.host}:{self.port}")
+            return True
+            
+        except OSError as e:
+            if e.errno == 98 or e.errno == 10048:  # Address already in use
+                print(f"[NetworkManager-{self.node_id}] Port {self.port} already in use")
+            else:
+                print(f"[NetworkManager-{self.node_id}] Error binding to {self.host}:{self.port}: {e}")
+            self.server_socket = None
+            return False
+        except Exception as e:
+            print(f"[NetworkManager-{self.node_id}] Error initializing listener: {e}")
+            self.server_socket = None
+            return False
+    
     def start_server(self):
         """
         Start listening for incoming connections
         This will be run in a separate thread
         """
-        # Placeholder - will be implemented in Phase 3
+        # Placeholder - will be implemented in next commit
         pass
     
     def stop_server(self):
         """
         Stop the server and close all connections
         """
-        # Placeholder - will be implemented in Phase 3
-        pass
+        self.running = False
+        
+        # Close server socket
+        if self.server_socket is not None:
+            try:
+                self.server_socket.close()
+                print(f"[NetworkManager-{self.node_id}] Server socket closed")
+            except Exception as e:
+                print(f"[NetworkManager-{self.node_id}] Error closing server socket: {e}")
+            finally:
+                self.server_socket = None
+        
+        # Close all client connections
+        for node_id in list(self.connections.keys()):
+            self.close_connection(node_id)
     
     def close_connection(self, node_id: str):
         """
