@@ -210,6 +210,10 @@ class MetricsCollector:
         self.sma_window_size = 10  # Simple Moving Average window (number of samples)
         self.ema_alpha = 0.3  # Exponential Moving Average smoothing factor (0-1)
         
+        # Latency and RTT tracking {node_id: deque of (timestamp, latency_ms)}
+        self.latency_samples: Dict[str, deque] = {}  # Per-node latency samples
+        self.rtt_samples: Dict[str, deque] = {}  # Per-node RTT samples
+        
         print("[MetricsCollector] Initialized")
     
     def set_node_factory(self, node_factory: NodeFactory):
@@ -260,6 +264,168 @@ class MetricsCollector:
         average_throughput = total_throughput / len(recent_samples)
         
         return round(average_throughput, 2)
+    
+    def calculate_average_latency(self, node_id: str, window_seconds: int = 300) -> float:
+        """
+        Calculate average latency for a node from recent samples
+        
+        Args:
+            node_id: ID of the node
+            window_seconds: Time window in seconds to calculate average over (default: 300 = 5 minutes)
+            
+        Returns:
+            Average latency in milliseconds
+        """
+        latency_samples = self.get_metric_samples(
+            MetricType.LATENCY,
+            node_id=node_id,
+            limit=1000
+        )
+        
+        if not latency_samples:
+            return 0.0
+        
+        # Filter by time window
+        cutoff_time = datetime.now() - timedelta(seconds=window_seconds)
+        recent_samples = [
+            s for s in latency_samples
+            if s.timestamp >= cutoff_time
+        ]
+        
+        if not recent_samples:
+            return 0.0
+        
+        avg_latency = sum(s.value for s in recent_samples) / len(recent_samples)
+        return round(avg_latency, 2)
+    
+    def calculate_average_rtt(self, node_id: str, window_seconds: int = 300) -> float:
+        """
+        Calculate average round-trip time for a node from recent samples
+        
+        Args:
+            node_id: ID of the node
+            window_seconds: Time window in seconds to calculate average over (default: 300 = 5 minutes)
+            
+        Returns:
+            Average RTT in milliseconds
+        """
+        rtt_samples = self.get_metric_samples(
+            MetricType.RTT,
+            node_id=node_id,
+            limit=1000
+        )
+        
+        if not rtt_samples:
+            return 0.0
+        
+        # Filter by time window
+        cutoff_time = datetime.now() - timedelta(seconds=window_seconds)
+        recent_samples = [
+            s for s in rtt_samples
+            if s.timestamp >= cutoff_time
+        ]
+        
+        if not recent_samples:
+            return 0.0
+        
+        avg_rtt = sum(s.value for s in recent_samples) / len(recent_samples)
+        return round(avg_rtt, 2)
+    
+    def get_latency_stats(self, node_id: Optional[str] = None) -> Dict:
+        """
+        Get latency statistics
+        
+        Args:
+            node_id: Optional node ID, or None for network-wide stats
+            
+        Returns:
+            Dictionary with latency statistics
+        """
+        if node_id:
+            samples = self.get_metric_samples(MetricType.LATENCY, node_id=node_id, limit=1000)
+            if not samples:
+                return {"node_id": node_id, "average_latency_ms": 0.0, "min_latency_ms": 0.0, "max_latency_ms": 0.0, "sample_count": 0}
+            
+            values = [s.value for s in samples]
+            avg = self.calculate_average_latency(node_id)
+            
+            return {
+                "node_id": node_id,
+                "average_latency_ms": avg,
+                "min_latency_ms": round(min(values), 2),
+                "max_latency_ms": round(max(values), 2),
+                "sample_count": len(values),
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            # Network-wide stats
+            if not self.node_factory:
+                return {}
+            
+            node_stats = []
+            total_avg = 0.0
+            
+            for nid in self.node_factory.node_configs.keys():
+                stats = self.get_latency_stats(node_id=nid)
+                if stats and stats.get("sample_count", 0) > 0:
+                    node_stats.append(stats)
+                    total_avg += stats.get("average_latency_ms", 0)
+            
+            return {
+                "network_wide": True,
+                "average_latency_ms": round(total_avg / len(node_stats), 2) if node_stats else 0.0,
+                "node_count": len(node_stats),
+                "node_stats": node_stats,
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    def get_rtt_stats(self, node_id: Optional[str] = None) -> Dict:
+        """
+        Get RTT statistics
+        
+        Args:
+            node_id: Optional node ID, or None for network-wide stats
+            
+        Returns:
+            Dictionary with RTT statistics
+        """
+        if node_id:
+            samples = self.get_metric_samples(MetricType.RTT, node_id=node_id, limit=1000)
+            if not samples:
+                return {"node_id": node_id, "average_rtt_ms": 0.0, "min_rtt_ms": 0.0, "max_rtt_ms": 0.0, "sample_count": 0}
+            
+            values = [s.value for s in samples]
+            avg = self.calculate_average_rtt(node_id)
+            
+            return {
+                "node_id": node_id,
+                "average_rtt_ms": avg,
+                "min_rtt_ms": round(min(values), 2),
+                "max_rtt_ms": round(max(values), 2),
+                "sample_count": len(values),
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            # Network-wide stats
+            if not self.node_factory:
+                return {}
+            
+            node_stats = []
+            total_avg = 0.0
+            
+            for nid in self.node_factory.node_configs.keys():
+                stats = self.get_rtt_stats(node_id=nid)
+                if stats and stats.get("sample_count", 0) > 0:
+                    node_stats.append(stats)
+                    total_avg += stats.get("average_rtt_ms", 0)
+            
+            return {
+                "network_wide": True,
+                "average_rtt_ms": round(total_avg / len(node_stats), 2) if node_stats else 0.0,
+                "node_count": len(node_stats),
+                "node_stats": node_stats,
+                "timestamp": datetime.now().isoformat()
+            }
     
     def calculate_moving_average_throughput(
         self,
@@ -404,12 +570,18 @@ class MetricsCollector:
             # Calculate real-time throughput
             realtime_throughput = self.calculate_realtime_throughput(node_id, window_seconds=60)
             
+            # Calculate average latency
+            average_latency = self.calculate_average_latency(node_id)
+            
+            # Calculate average RTT
+            average_rtt = self.calculate_average_rtt(node_id)
+            
             node_metrics = NodeMetrics(
                 node_id=node_id,
                 timestamp=datetime.now(),
                 throughput_mbps=realtime_throughput,  # Use real-time throughput
-                average_latency_ms=0.0,  # Will be calculated from transfer metrics
-                average_rtt_ms=0.0,  # Will be calculated from transfer metrics
+                average_latency_ms=average_latency,
+                average_rtt_ms=average_rtt,
                 storage_utilization_percent=storage_util.get("utilization_percent", 0.0),
                 network_utilization_percent=network_util.get("utilization_percent", 0.0),
                 total_transfers=total_transfers,
@@ -538,7 +710,9 @@ class MetricsCollector:
         transfer_id: str,
         success: bool,
         chunks_transferred: int = 0,
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        first_chunk_latency_ms: Optional[float] = None,
+        average_chunk_rtt_ms: Optional[float] = None
     ):
         """
         Record the end of a file transfer
@@ -548,6 +722,8 @@ class MetricsCollector:
             success: Whether transfer was successful
             chunks_transferred: Number of chunks transferred
             error_message: Error message if transfer failed
+            first_chunk_latency_ms: Latency to receive first chunk (ms)
+            average_chunk_rtt_ms: Average round-trip time per chunk (ms)
         """
         with self.collection_lock:
             if transfer_id not in self.transfer_metrics:
@@ -566,6 +742,16 @@ class MetricsCollector:
                     transfer.file_size_bytes / (1024 * 1024) / transfer.duration_seconds
                 )
             
+            # Record latency and RTT
+            if first_chunk_latency_ms is not None:
+                transfer.latency_ms = first_chunk_latency_ms
+            elif success and transfer.duration_seconds > 0 and chunks_transferred > 0:
+                # Estimate latency as time per chunk (first chunk typically takes longer)
+                transfer.latency_ms = (transfer.duration_seconds / chunks_transferred) * 1000
+            
+            if average_chunk_rtt_ms is not None:
+                transfer.latency_ms = average_chunk_rtt_ms  # Use RTT as latency if provided
+            
             # Record metric samples
             if success:
                 self._record_metric_sample(
@@ -575,6 +761,60 @@ class MetricsCollector:
                     node_id=transfer.target_node,
                     metadata={"transfer_id": transfer_id, "file_id": transfer.file_id}
                 )
+                
+                # Record latency
+                if transfer.latency_ms:
+                    self._record_metric_sample(
+                        MetricType.LATENCY,
+                        transfer.latency_ms,
+                        "ms",
+                        node_id=transfer.target_node,
+                        metadata={"transfer_id": transfer_id, "file_id": transfer.file_id}
+                    )
+                
+                # Record RTT
+                if average_chunk_rtt_ms:
+                    self._record_metric_sample(
+                        MetricType.RTT,
+                        average_chunk_rtt_ms,
+                        "ms",
+                        node_id=transfer.target_node,
+                        metadata={"transfer_id": transfer_id, "file_id": transfer.file_id}
+                    )
+    
+    def record_latency(self, node_id: str, latency_ms: float, metadata: Optional[Dict] = None):
+        """
+        Record a latency measurement for a node
+        
+        Args:
+            node_id: Node ID
+            latency_ms: Latency in milliseconds
+            metadata: Optional metadata
+        """
+        self._record_metric_sample(
+            MetricType.LATENCY,
+            latency_ms,
+            "ms",
+            node_id=node_id,
+            metadata=metadata or {}
+        )
+    
+    def record_rtt(self, node_id: str, rtt_ms: float, metadata: Optional[Dict] = None):
+        """
+        Record a round-trip time measurement for a node
+        
+        Args:
+            node_id: Node ID
+            rtt_ms: Round-trip time in milliseconds
+            metadata: Optional metadata
+        """
+        self._record_metric_sample(
+            MetricType.RTT,
+            rtt_ms,
+            "ms",
+            node_id=node_id,
+            metadata=metadata or {}
+        )
     
     def _record_metric_sample(
         self,
