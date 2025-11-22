@@ -8,6 +8,7 @@ import os
 import socket
 from typing import Dict, List, Optional
 from storage_virtual_node import StorageVirtualNode
+from node_discovery import NodeDiscovery
 
 
 class NodeFactory:
@@ -29,6 +30,12 @@ class NodeFactory:
         self.start_port = start_port
         self.port_range_size = port_range_size
         self.reserved_ports: set = set()  # Ports reserved but not yet used
+        
+        # Node discovery instances {node_id: NodeDiscovery}
+        self.discovery_instances: Dict[str, NodeDiscovery] = {}
+        self.discovery_enabled = False
+        self.discovery_port = 9999  # Default discovery port
+        
         print(f"[NodeFactory] Initialized (port range: {start_port}-{start_port + port_range_size - 1})")
     
     def create_node(
@@ -259,6 +266,11 @@ class NodeFactory:
             node.stop(graceful=True, timeout=5.0)
             node.join(timeout=3.0)
         
+        # Stop discovery if enabled
+        if node_id in self.discovery_instances:
+            self.discovery_instances[node_id].stop()
+            del self.discovery_instances[node_id]
+        
         # Remove from dictionaries
         del self.nodes[node_id]
         del self.node_configs[node_id]
@@ -272,6 +284,11 @@ class NodeFactory:
         for node_id, node in self.nodes.items():
             try:
                 node.start()
+                
+                # Start discovery if enabled
+                if self.discovery_enabled and node_id in self.discovery_instances:
+                    self.discovery_instances[node_id].start()
+                
                 print(f"[NodeFactory] Started node {node_id}")
             except Exception as e:
                 print(f"[NodeFactory] Error starting node {node_id}: {e}")
@@ -287,6 +304,11 @@ class NodeFactory:
         print(f"[NodeFactory] Stopping {len(self.nodes)} nodes...")
         for node_id, node in self.nodes.items():
             try:
+                # Stop discovery first
+                if node_id in self.discovery_instances:
+                    self.discovery_instances[node_id].send_goodbye()
+                    self.discovery_instances[node_id].stop()
+                
                 node.stop(graceful=graceful, timeout=timeout)
                 node.join(timeout=3.0)
                 print(f"[NodeFactory] Stopped node {node_id}")
@@ -708,7 +730,117 @@ class NodeFactory:
             "port_info": self.get_port_info()
         }
     
+    def enable_discovery(self, discovery_port: int = 9999, broadcast_interval: float = 30.0):
+        """
+        Enable node discovery for all nodes
+        
+        Args:
+            discovery_port: UDP port for discovery protocol (default: 9999)
+            broadcast_interval: Seconds between discovery broadcasts (default: 30)
+        """
+        self.discovery_port = discovery_port
+        self.discovery_enabled = True
+        
+        print(f"[NodeFactory] Enabling discovery on port {discovery_port}...")
+        
+        for node_id, config in self.node_configs.items():
+            if node_id not in self.discovery_instances:
+                host = config.get("host", "localhost")
+                port = config.get("port", 5000)
+                
+                discovery = NodeDiscovery(
+                    node_id=node_id,
+                    host=host,
+                    port=port,
+                    discovery_port=discovery_port,
+                    broadcast_interval=broadcast_interval
+                )
+                
+                # Set up callbacks to connect nodes when discovered
+                def make_discovery_callback(node_id):
+                    def on_discovered(discovered_id, discovered_host, discovered_port):
+                        # Connect this node to the discovered node
+                        node = self.nodes.get(node_id)
+                        if node and node.network_manager:
+                            node.network_manager.connect_to_node(
+                                discovered_id,
+                                discovered_host,
+                                discovered_port
+                            )
+                    return on_discovered
+                
+                discovery.on_node_discovered = make_discovery_callback(node_id)
+                self.discovery_instances[node_id] = discovery
+                
+                # Start discovery if node is running
+                node = self.nodes.get(node_id)
+                if node and (node.is_alive() or node.running):
+                    discovery.start()
+        
+        print(f"[NodeFactory] Discovery enabled for {len(self.discovery_instances)} nodes")
+    
+    def disable_discovery(self):
+        """Disable node discovery for all nodes"""
+        print(f"[NodeFactory] Disabling discovery...")
+        
+        for node_id, discovery in self.discovery_instances.items():
+            discovery.send_goodbye()
+            discovery.stop()
+        
+        self.discovery_instances.clear()
+        self.discovery_enabled = False
+        print(f"[NodeFactory] Discovery disabled")
+    
+    def get_discovered_nodes(self, node_id: Optional[str] = None) -> Dict:
+        """
+        Get discovered nodes for a specific node or all nodes
+        
+        Args:
+            node_id: Specific node ID, or None for all nodes
+            
+        Returns:
+            Dictionary with discovered nodes information
+        """
+        if node_id:
+            discovery = self.discovery_instances.get(node_id)
+            if discovery:
+                return {
+                    node_id: {
+                        "discovered_nodes": [
+                            {
+                                "node_id": n.node_id,
+                                "host": n.host,
+                                "port": n.port,
+                                "last_seen": n.last_seen,
+                                "is_active": n.is_active
+                            }
+                            for n in discovery.get_discovered_nodes()
+                        ],
+                        "stats": discovery.get_discovery_stats()
+                    }
+                }
+            return {}
+        
+        # Return for all nodes
+        result = {}
+        for nid, discovery in self.discovery_instances.items():
+            result[nid] = {
+                "discovered_nodes": [
+                    {
+                        "node_id": n.node_id,
+                        "host": n.host,
+                        "port": n.port,
+                        "last_seen": n.last_seen,
+                        "is_active": n.is_active
+                    }
+                    for n in discovery.get_discovered_nodes()
+                ],
+                "stats": discovery.get_discovery_stats()
+            }
+        return result
+    
     def __repr__(self):
         """String representation of NodeFactory"""
-        return f"NodeFactory(nodes={len(self.nodes)})"
+        discovery_status = "enabled" if self.discovery_enabled else "disabled"
+        return f"NodeFactory(nodes={len(self.nodes)}, discovery={discovery_status})"
 
