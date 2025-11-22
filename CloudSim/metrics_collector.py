@@ -9,6 +9,9 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 import time
 import threading
+import json
+import csv
+import os
 from collections import deque
 from node_factory import NodeFactory
 from storage_virtual_node import StorageVirtualNode
@@ -995,6 +998,375 @@ class MetricsCollector:
             self.network_metrics_history.clear()
         
         print("[MetricsCollector] History cleared")
+    
+    def export_metric_samples_to_csv(
+        self,
+        metric_type: MetricType,
+        output_dir: str = "metrics",
+        node_id: Optional[str] = None
+    ) -> str:
+        """
+        Export metric samples to CSV file
+        
+        Args:
+            metric_type: Type of metric to export
+            output_dir: Output directory (default: "metrics")
+            node_id: Optional node ID to filter by
+            
+        Returns:
+            Path to exported CSV file
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        samples = self.get_metric_samples(metric_type, node_id=node_id)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        node_suffix = f"_{node_id}" if node_id else ""
+        filename = f"metric_samples_{metric_type.value}{node_suffix}_{timestamp}.csv"
+        filepath = os.path.join(output_dir, filename)
+        
+        with open(filepath, 'w', newline='') as csvfile:
+            fieldnames = ['timestamp', 'node_id', 'metric_type', 'value', 'unit', 'metadata']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            writer.writeheader()
+            for sample in samples:
+                writer.writerow({
+                    'timestamp': sample.timestamp.isoformat(),
+                    'node_id': sample.node_id or '',
+                    'metric_type': sample.metric_type.value,
+                    'value': sample.value,
+                    'unit': sample.unit,
+                    'metadata': json.dumps(sample.metadata)
+                })
+        
+        print(f"[MetricsCollector] Exported {len(samples)} {metric_type.value} samples to {filepath}")
+        return filepath
+    
+    def export_metric_samples_to_json(
+        self,
+        metric_type: MetricType,
+        output_dir: str = "metrics",
+        node_id: Optional[str] = None
+    ) -> str:
+        """
+        Export metric samples to JSON file
+        
+        Args:
+            metric_type: Type of metric to export
+            output_dir: Output directory (default: "metrics")
+            node_id: Optional node ID to filter by
+            
+        Returns:
+            Path to exported JSON file
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        samples = self.get_metric_samples(metric_type, node_id=node_id)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        node_suffix = f"_{node_id}" if node_id else ""
+        filename = f"metric_samples_{metric_type.value}{node_suffix}_{timestamp}.json"
+        filepath = os.path.join(output_dir, filename)
+        
+        data = {
+            "export_timestamp": datetime.now().isoformat(),
+            "metric_type": metric_type.value,
+            "node_id": node_id,
+            "sample_count": len(samples),
+            "samples": [s.to_dict() for s in samples]
+        }
+        
+        with open(filepath, 'w') as jsonfile:
+            json.dump(data, jsonfile, indent=2)
+        
+        print(f"[MetricsCollector] Exported {len(samples)} {metric_type.value} samples to {filepath}")
+        return filepath
+    
+    def export_node_metrics_to_csv(
+        self,
+        node_id: str,
+        output_dir: str = "metrics",
+        limit: Optional[int] = None
+    ) -> str:
+        """
+        Export node metrics history to CSV file
+        
+        Args:
+            node_id: Node ID to export
+            output_dir: Output directory (default: "metrics")
+            limit: Maximum number of samples to export
+            
+        Returns:
+            Path to exported CSV file
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        metrics = self.get_node_metrics_history(node_id, limit=limit)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"node_metrics_{node_id}_{timestamp}.csv"
+        filepath = os.path.join(output_dir, filename)
+        
+        if not metrics:
+            print(f"[MetricsCollector] No metrics found for node {node_id}")
+            return filepath
+        
+        with open(filepath, 'w', newline='') as csvfile:
+            fieldnames = list(metrics[0].to_dict().keys())
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            writer.writeheader()
+            for metric in metrics:
+                writer.writerow(metric.to_dict())
+        
+        print(f"[MetricsCollector] Exported {len(metrics)} node metrics for {node_id} to {filepath}")
+        return filepath
+    
+    def export_node_metrics_to_json(
+        self,
+        node_id: str,
+        output_dir: str = "metrics",
+        limit: Optional[int] = None
+    ) -> str:
+        """
+        Export node metrics history to JSON file
+        
+        Args:
+            node_id: Node ID to export
+            output_dir: Output directory (default: "metrics")
+            limit: Maximum number of samples to export
+            
+        Returns:
+            Path to exported JSON file
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        metrics = self.get_node_metrics_history(node_id, limit=limit)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"node_metrics_{node_id}_{timestamp}.json"
+        filepath = os.path.join(output_dir, filename)
+        
+        data = {
+            "export_timestamp": datetime.now().isoformat(),
+            "node_id": node_id,
+            "sample_count": len(metrics),
+            "metrics": [m.to_dict() for m in metrics]
+        }
+        
+        with open(filepath, 'w') as jsonfile:
+            json.dump(data, jsonfile, indent=2)
+        
+        print(f"[MetricsCollector] Exported {len(metrics)} node metrics for {node_id} to {filepath}")
+        return filepath
+    
+    def export_network_metrics_to_csv(
+        self,
+        output_dir: str = "metrics",
+        limit: Optional[int] = None
+    ) -> str:
+        """
+        Export network metrics history to CSV file
+        
+        Args:
+            output_dir: Output directory (default: "metrics")
+            limit: Maximum number of samples to export
+            
+        Returns:
+            Path to exported CSV file
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        metrics = self.get_network_metrics_history(limit=limit)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"network_metrics_{timestamp}.csv"
+        filepath = os.path.join(output_dir, filename)
+        
+        if not metrics:
+            print(f"[MetricsCollector] No network metrics found")
+            return filepath
+        
+        with open(filepath, 'w', newline='') as csvfile:
+            # Flatten network metrics (excluding node_metrics list)
+            fieldnames = [k for k in metrics[0].to_dict().keys() if k != 'node_metrics']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            writer.writeheader()
+            for metric in metrics:
+                metric_dict = metric.to_dict()
+                # Remove node_metrics from CSV (too complex for flat CSV)
+                metric_dict.pop('node_metrics', None)
+                writer.writerow(metric_dict)
+        
+        print(f"[MetricsCollector] Exported {len(metrics)} network metrics to {filepath}")
+        return filepath
+    
+    def export_network_metrics_to_json(
+        self,
+        output_dir: str = "metrics",
+        limit: Optional[int] = None
+    ) -> str:
+        """
+        Export network metrics history to JSON file
+        
+        Args:
+            output_dir: Output directory (default: "metrics")
+            limit: Maximum number of samples to export
+            
+        Returns:
+            Path to exported JSON file
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        metrics = self.get_network_metrics_history(limit=limit)
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"network_metrics_{timestamp}.json"
+        filepath = os.path.join(output_dir, filename)
+        
+        data = {
+            "export_timestamp": datetime.now().isoformat(),
+            "sample_count": len(metrics),
+            "metrics": [m.to_dict() for m in metrics]
+        }
+        
+        with open(filepath, 'w') as jsonfile:
+            json.dump(data, jsonfile, indent=2)
+        
+        print(f"[MetricsCollector] Exported {len(metrics)} network metrics to {filepath}")
+        return filepath
+    
+    def export_transfer_metrics_to_csv(
+        self,
+        output_dir: str = "metrics"
+    ) -> str:
+        """
+        Export transfer metrics to CSV file
+        
+        Args:
+            output_dir: Output directory (default: "metrics")
+            
+        Returns:
+            Path to exported CSV file
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        with self.collection_lock:
+            transfers = list(self.transfer_metrics.values())
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"transfer_metrics_{timestamp}.csv"
+        filepath = os.path.join(output_dir, filename)
+        
+        if not transfers:
+            print(f"[MetricsCollector] No transfer metrics found")
+            return filepath
+        
+        with open(filepath, 'w', newline='') as csvfile:
+            fieldnames = list(transfers[0].to_dict().keys())
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            writer.writeheader()
+            for transfer in transfers:
+                writer.writerow(transfer.to_dict())
+        
+        print(f"[MetricsCollector] Exported {len(transfers)} transfer metrics to {filepath}")
+        return filepath
+    
+    def export_transfer_metrics_to_json(
+        self,
+        output_dir: str = "metrics"
+    ) -> str:
+        """
+        Export transfer metrics to JSON file
+        
+        Args:
+            output_dir: Output directory (default: "metrics")
+            
+        Returns:
+            Path to exported JSON file
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        
+        with self.collection_lock:
+            transfers = list(self.transfer_metrics.values())
+        
+        # Generate filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"transfer_metrics_{timestamp}.json"
+        filepath = os.path.join(output_dir, filename)
+        
+        data = {
+            "export_timestamp": datetime.now().isoformat(),
+            "transfer_count": len(transfers),
+            "transfers": [t.to_dict() for t in transfers]
+        }
+        
+        with open(filepath, 'w') as jsonfile:
+            json.dump(data, jsonfile, indent=2)
+        
+        print(f"[MetricsCollector] Exported {len(transfers)} transfer metrics to {filepath}")
+        return filepath
+    
+    def export_all_metrics(
+        self,
+        output_dir: str = "metrics",
+        format: str = "json"
+    ) -> Dict[str, str]:
+        """
+        Export all metrics to files
+        
+        Args:
+            output_dir: Output directory (default: "metrics")
+            format: Export format - "json" or "csv" (default: "json")
+            
+        Returns:
+            Dictionary mapping metric type to file path
+        """
+        exported_files = {}
+        
+        # Export all metric types
+        for metric_type in MetricType:
+            if format == "csv":
+                filepath = self.export_metric_samples_to_csv(metric_type, output_dir)
+            else:
+                filepath = self.export_metric_samples_to_json(metric_type, output_dir)
+            exported_files[f"metric_samples_{metric_type.value}"] = filepath
+        
+        # Export node metrics for all nodes
+        if self.node_factory:
+            for node_id in self.node_factory.node_configs.keys():
+                if format == "csv":
+                    filepath = self.export_node_metrics_to_csv(node_id, output_dir)
+                else:
+                    filepath = self.export_node_metrics_to_json(node_id, output_dir)
+                exported_files[f"node_metrics_{node_id}"] = filepath
+        
+        # Export network metrics
+        if format == "csv":
+            filepath = self.export_network_metrics_to_csv(output_dir)
+        else:
+            filepath = self.export_network_metrics_to_json(output_dir)
+        exported_files["network_metrics"] = filepath
+        
+        # Export transfer metrics
+        if format == "csv":
+            filepath = self.export_transfer_metrics_to_csv(output_dir)
+        else:
+            filepath = self.export_transfer_metrics_to_json(output_dir)
+        exported_files["transfer_metrics"] = filepath
+        
+        print(f"[MetricsCollector] Exported all metrics to {output_dir} in {format.upper()} format")
+        return exported_files
     
     def __repr__(self):
         """String representation of MetricsCollector"""
