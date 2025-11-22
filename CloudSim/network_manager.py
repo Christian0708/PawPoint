@@ -6,7 +6,7 @@ Manages socket connections and facilitates data transfer operations
 import socket
 import json
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from enum import Enum
 
 
@@ -166,7 +166,101 @@ class NetworkManager:
         # Flag to control server loop
         self.running = False
         
+        # Message handler registry {message_type: handler_function}
+        self.message_handlers: Dict[str, Callable] = {}
+        
+        # Register default handlers (can be overridden)
+        self._register_default_handlers()
+        
         print(f"[NetworkManager-{self.node_id}] Initialized on {self.host}:{self.port}")
+    
+    def _register_default_handlers(self):
+        """Register default message handlers"""
+        self.message_handlers[MessageType.TRANSFER_REQUEST.value] = self._handle_transfer_request
+        self.message_handlers[MessageType.TRANSFER_RESPONSE.value] = self._handle_transfer_response
+        self.message_handlers[MessageType.CHUNK_DATA.value] = self._handle_chunk_data
+        self.message_handlers[MessageType.CHUNK_ACK.value] = self._handle_chunk_ack
+        self.message_handlers[MessageType.STATUS_QUERY.value] = self._handle_status_query
+        self.message_handlers[MessageType.STATUS_RESPONSE.value] = self._handle_status_response
+        self.message_handlers[MessageType.ERROR.value] = self._handle_error
+    
+    def register_handler(self, message_type: str, handler: Callable):
+        """
+        Register a custom handler for a message type
+        
+        Args:
+            message_type: Message type string (from MessageType enum)
+            handler: Function that takes (message, client_socket, client_address) as arguments
+        """
+        self.message_handlers[message_type] = handler
+        print(f"[NetworkManager-{self.node_id}] Registered handler for {message_type}")
+    
+    def dispatch_request(self, message: Dict[str, Any], client_socket: socket.socket, 
+                        client_address: tuple) -> bool:
+        """
+        Dispatch a received message to the appropriate handler
+        
+        Args:
+            message: Parsed message dictionary
+            client_socket: Socket connection from client
+            client_address: Tuple of (host, port) of client
+            
+        Returns:
+            bool: True if message was handled, False otherwise
+        """
+        message_type = message.get("type")
+        
+        if message_type not in self.message_handlers:
+            print(f"[NetworkManager-{self.node_id}] No handler registered for message type: {message_type}")
+            return False
+        
+        try:
+            # Call the appropriate handler
+            handler = self.message_handlers[message_type]
+            handler(message, client_socket, client_address)
+            return True
+        except Exception as e:
+            print(f"[NetworkManager-{self.node_id}] Error in handler for {message_type}: {e}")
+            return False
+    
+    # Default handler methods (placeholders - can be overridden)
+    def _handle_transfer_request(self, message: Dict[str, Any], client_socket: socket.socket, 
+                                 client_address: tuple):
+        """Handle transfer request message"""
+        print(f"[NetworkManager-{self.node_id}] Transfer request from {client_address}: {message.get('file_name')}")
+        # Placeholder - will be implemented when integrating with StorageVirtualNode
+    
+    def _handle_transfer_response(self, message: Dict[str, Any], client_socket: socket.socket, 
+                                  client_address: tuple):
+        """Handle transfer response message"""
+        print(f"[NetworkManager-{self.node_id}] Transfer response: {message.get('accepted')}")
+    
+    def _handle_chunk_data(self, message: Dict[str, Any], client_socket: socket.socket, 
+                           client_address: tuple):
+        """Handle chunk data message"""
+        print(f"[NetworkManager-{self.node_id}] Chunk data: file_id={message.get('file_id')}, chunk_id={message.get('chunk_id')}")
+    
+    def _handle_chunk_ack(self, message: Dict[str, Any], client_socket: socket.socket, 
+                          client_address: tuple):
+        """Handle chunk acknowledgment message"""
+        print(f"[NetworkManager-{self.node_id}] Chunk ACK: file_id={message.get('file_id')}, chunk_id={message.get('chunk_id')}")
+    
+    def _handle_status_query(self, message: Dict[str, Any], client_socket: socket.socket, 
+                             client_address: tuple):
+        """Handle status query message"""
+        print(f"[NetworkManager-{self.node_id}] Status query from {client_address}")
+    
+    def _handle_status_response(self, message: Dict[str, Any], client_socket: socket.socket, 
+                                client_address: tuple):
+        """Handle status response message"""
+        print(f"[NetworkManager-{self.node_id}] Status response received")
+    
+    def _handle_error(self, message: Dict[str, Any], client_socket: socket.socket, 
+                     client_address: tuple):
+        """Handle error message"""
+        error_code = message.get('error_code', 'UNKNOWN')
+        error_msg = message.get('error_message', 'No message')
+        print(f"[NetworkManager-{self.node_id}] Error from {client_address}: [{error_code}] {error_msg}")
     
     def connect_to_node(self, target_node_id: str, target_host: str, target_port: int) -> bool:
         """
@@ -448,19 +542,35 @@ class NetworkManager:
     def _handle_incoming_connection(self, client_socket: socket.socket, client_address: tuple):
         """
         Handle an incoming connection
-        Placeholder - will be implemented in next commit with request dispatcher
+        Receives messages and dispatches them to appropriate handlers
         
         Args:
             client_socket: Socket connection from client
             client_address: Tuple of (host, port) of client
         """
-        # For now, just close the connection
-        # In next commit, we'll receive messages and dispatch them
         try:
-            client_socket.close()
-            print(f"[NetworkManager-{self.node_id}] Closed connection from {client_address[0]}:{client_address[1]}")
+            # Receive message from client
+            message = self.receive_message(client_socket)
+            
+            if message is None:
+                print(f"[NetworkManager-{self.node_id}] Failed to receive message from {client_address[0]}:{client_address[1]}")
+                client_socket.close()
+                return
+            
+            # Dispatch message to appropriate handler
+            handled = self.dispatch_request(message, client_socket, client_address)
+            
+            if not handled:
+                print(f"[NetworkManager-{self.node_id}] Message from {client_address[0]}:{client_address[1]} was not handled")
+            
         except Exception as e:
-            print(f"[NetworkManager-{self.node_id}] Error closing client connection: {e}")
+            print(f"[NetworkManager-{self.node_id}] Error handling connection from {client_address[0]}:{client_address[1]}: {e}")
+        finally:
+            # Close the connection after handling
+            try:
+                client_socket.close()
+            except Exception as e:
+                print(f"[NetworkManager-{self.node_id}] Error closing client connection: {e}")
     
     def stop_server(self):
         """
