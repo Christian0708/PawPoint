@@ -2,6 +2,7 @@ import time
 import math
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 from enum import Enum, auto
@@ -86,6 +87,11 @@ class StorageVirtualNode(threading.Thread):
         # Network listener thread (will be started separately)
         self.listener_thread: Optional[threading.Thread] = None
         
+        # Thread pool for asynchronous file transfer processing
+        self.transfer_executor: Optional[ThreadPoolExecutor] = None
+        self.max_concurrent_transfers = 10  # Maximum concurrent transfers
+        self.active_transfer_futures: Dict[str, Future] = {}  # Track transfer futures
+        
         # Create storage directory structure
         self.create_storage_structure()
 
@@ -124,6 +130,13 @@ class StorageVirtualNode(threading.Thread):
         self.running = True
         print(f"[{self.node_id}] Node thread started")
         
+        # Initialize thread pool for asynchronous transfers
+        self.transfer_executor = ThreadPoolExecutor(
+            max_workers=self.max_concurrent_transfers,
+            thread_name_prefix=f"Transfer-{self.node_id}"
+        )
+        print(f"[{self.node_id}] Transfer executor initialized (max {self.max_concurrent_transfers} workers)")
+        
         # Start network listener in a separate thread
         self.listener_thread = threading.Thread(
             target=self._run_network_listener,
@@ -151,6 +164,12 @@ class StorageVirtualNode(threading.Thread):
         """
         self.running = False
         self.stop_event.set()
+        
+        # Shutdown transfer executor
+        if self.transfer_executor:
+            print(f"[{self.node_id}] Shutting down transfer executor...")
+            self.transfer_executor.shutdown(wait=True, timeout=5.0)
+            print(f"[{self.node_id}] Transfer executor shut down")
         
         # Stop network manager
         if self.network_manager:
@@ -375,6 +394,51 @@ class StorageVirtualNode(threading.Thread):
                 self.sync_storage_metrics()
         
         return True
+
+    def process_chunk_transfer_async(
+        self,
+        file_id: str,
+        chunk_id: int,
+        source_node: str
+    ) -> Optional[Future]:
+        """
+        Process an incoming file chunk asynchronously using thread pool
+        
+        Args:
+            file_id: ID of the file being transferred
+            chunk_id: ID of the chunk to process
+            source_node: ID of the source node
+            
+        Returns:
+            Future object representing the async operation, or None if error
+        """
+        if not self.transfer_executor:
+            print(f"[{self.node_id}] Transfer executor not initialized")
+            return None
+        
+        # Submit chunk processing to thread pool
+        future = self.transfer_executor.submit(
+            self.process_chunk_transfer,
+            file_id,
+            chunk_id,
+            source_node
+        )
+        
+        # Track the future
+        transfer_key = f"{file_id}_{chunk_id}"
+        with self.transfer_lock:
+            self.active_transfer_futures[transfer_key] = future
+        
+        # Add callback to clean up future when done
+        def cleanup_future(f):
+            with self.transfer_lock:
+                if transfer_key in self.active_transfer_futures:
+                    del self.active_transfer_futures[transfer_key]
+        
+        future.add_done_callback(cleanup_future)
+        
+        print(f"[{self.node_id}] Submitted chunk {chunk_id} of file {file_id} for async processing")
+        return future
 
     def retrieve_file(
         self,
