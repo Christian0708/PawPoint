@@ -128,6 +128,27 @@ class StorageVirtualNode:
             print(f"[{self.node_id}] Error reading chunk {chunk_id}: {e}")
             return None
 
+    def get_actual_disk_usage(self) -> int:
+        """Calculate actual disk space used by reading file sizes from disk"""
+        total_size = 0
+        try:
+            # Walk through all files in the chunks directory
+            for filename in os.listdir(self.chunks_path):
+                file_path = os.path.join(self.chunks_path, filename)
+                if os.path.isfile(file_path):
+                    total_size += os.path.getsize(file_path)
+            return total_size
+        except Exception as e:
+            print(f"[{self.node_id}] Error calculating disk usage: {e}")
+            return 0
+
+    def sync_storage_metrics(self):
+        """Synchronize storage metrics with actual disk usage"""
+        actual_usage = self.get_actual_disk_usage()
+        if actual_usage != self.used_storage:
+            print(f"[{self.node_id}] Syncing storage: tracked={self.used_storage}, actual={actual_usage}")
+            self.used_storage = actual_usage
+
     def add_connection(self, node_id: str, bandwidth: int):
         """Add a network connection to another node"""
         self.connections[node_id] = bandwidth * 1000000  # Store in bits per second
@@ -168,8 +189,10 @@ class StorageVirtualNode:
         source_node: Optional[str] = None
     ) -> Optional[FileTransfer]:
         """Initiate a file storage request to this node"""
-        # Check if we have enough storage space
-        if self.used_storage + file_size > self.total_storage:
+        # Check if we have enough storage space using actual disk usage
+        actual_usage = self.get_actual_disk_usage()
+        if actual_usage + file_size > self.total_storage:
+            print(f"[{self.node_id}] Insufficient storage: need {file_size} bytes, available {self.total_storage - actual_usage} bytes")
             return None
         
         # Create file transfer record
@@ -236,10 +259,12 @@ class StorageVirtualNode:
         if all(c.status == TransferStatus.COMPLETED for c in transfer.chunks):
             transfer.status = TransferStatus.COMPLETED
             transfer.completed_at = time.time()
-            self.used_storage += transfer.total_size
             self.stored_files[file_id] = transfer
             del self.active_transfers[file_id]
             self.total_requests_processed += 1
+            
+            # Sync storage metrics with actual disk usage
+            self.sync_storage_metrics()
         
         return True
 
@@ -283,14 +308,18 @@ class StorageVirtualNode:
         return new_transfer
 
     def get_storage_utilization(self) -> Dict[str, Union[int, float, List[str]]]:
-        """Get current storage utilization metrics"""
+        """Get current storage utilization metrics using actual disk usage"""
+        # Get real disk usage
+        actual_disk_usage = self.get_actual_disk_usage()
+        
         return {
-            "used_bytes": self.used_storage,  # int
+            "used_bytes": actual_disk_usage,  # int - actual disk usage
+            "tracked_bytes": self.used_storage,  # int - tracked usage (may differ)
             "total_bytes": self.total_storage,  # int
-            "utilization_percent": (self.used_storage / self.total_storage) * 100,  # float
+            "utilization_percent": (actual_disk_usage / self.total_storage) * 100,  # float
             "files_stored": len(self.stored_files),  # int
-            "active_transfers": len(self.active_transfers)  # int
-            # Note: Removed list[str] since the current implementation doesn't return any lists
+            "active_transfers": len(self.active_transfers),  # int
+            "chunk_count": len(os.listdir(self.chunks_path)) if os.path.exists(self.chunks_path) else 0  # int
         }
 
     def get_network_utilization(self) -> Dict[str, Union[int, float, List[str]]]:
