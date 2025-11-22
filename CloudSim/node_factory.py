@@ -3,6 +3,8 @@ NodeFactory - Factory class for creating and managing multiple storage nodes
 Enables dynamic creation of nodes from configuration files
 """
 
+import json
+import os
 from typing import Dict, List, Optional
 from storage_virtual_node import StorageVirtualNode
 
@@ -226,6 +228,138 @@ class NodeFactory:
             "stopped_nodes": len(self.nodes) - running_count,
             "node_ids": list(self.nodes.keys())
         }
+    
+    def load_config_from_file(self, config_path: str) -> Optional[Dict]:
+        """
+        Load node configuration from a JSON file
+        
+        Args:
+            config_path: Path to the JSON configuration file
+            
+        Returns:
+            Parsed configuration dictionary, or None if error
+        """
+        if not os.path.exists(config_path):
+            print(f"[NodeFactory] Configuration file not found: {config_path}")
+            return None
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            
+            print(f"[NodeFactory] Loaded configuration from {config_path}")
+            return config
+            
+        except json.JSONDecodeError as e:
+            print(f"[NodeFactory] Invalid JSON in configuration file: {e}")
+            return None
+        except Exception as e:
+            print(f"[NodeFactory] Error loading configuration file: {e}")
+            return None
+    
+    def validate_node_config(self, node_config: Dict) -> bool:
+        """
+        Validate a node configuration dictionary
+        
+        Args:
+            node_config: Node configuration dictionary
+            
+        Returns:
+            True if configuration is valid, False otherwise
+        """
+        required_fields = ["id", "cpu_capacity", "memory_gb", "storage_gb", "bandwidth_mbps"]
+        
+        for field in required_fields:
+            if field not in node_config:
+                print(f"[NodeFactory] Missing required field: {field}")
+                return False
+        
+        # Validate data types and values
+        if not isinstance(node_config["id"], str):
+            print(f"[NodeFactory] Node ID must be a string")
+            return False
+        
+        if not isinstance(node_config["cpu_capacity"], int) or node_config["cpu_capacity"] <= 0:
+            print(f"[NodeFactory] cpu_capacity must be a positive integer")
+            return False
+        
+        if not isinstance(node_config["memory_gb"], int) or node_config["memory_gb"] <= 0:
+            print(f"[NodeFactory] memory_gb must be a positive integer")
+            return False
+        
+        if not isinstance(node_config["storage_gb"], int) or node_config["storage_gb"] <= 0:
+            print(f"[NodeFactory] storage_gb must be a positive integer")
+            return False
+        
+        if not isinstance(node_config["bandwidth_mbps"], int) or node_config["bandwidth_mbps"] <= 0:
+            print(f"[NodeFactory] bandwidth_mbps must be a positive integer")
+            return False
+        
+        return True
+    
+    def create_nodes_from_config(self, config_path: str) -> List[StorageVirtualNode]:
+        """
+        Create nodes from a JSON configuration file
+        
+        Args:
+            config_path: Path to the JSON configuration file
+            
+        Returns:
+            List of created StorageVirtualNode instances
+        """
+        # Load configuration
+        config = self.load_config_from_file(config_path)
+        if config is None:
+            return []
+        
+        # Get nodes array
+        if "nodes" not in config:
+            print(f"[NodeFactory] Configuration file missing 'nodes' array")
+            return []
+        
+        nodes_list = config["nodes"]
+        if not isinstance(nodes_list, list):
+            print(f"[NodeFactory] 'nodes' must be an array")
+            return []
+        
+        created_nodes = []
+        
+        # Create each node
+        for node_config in nodes_list:
+            if not isinstance(node_config, dict):
+                print(f"[NodeFactory] Skipping invalid node configuration (not a dict)")
+                continue
+            
+            # Validate configuration
+            if not self.validate_node_config(node_config):
+                print(f"[NodeFactory] Skipping invalid node: {node_config.get('id', 'unknown')}")
+                continue
+            
+            # Extract configuration values
+            node_id = node_config["id"]
+            cpu_capacity = node_config["cpu_capacity"]
+            memory_gb = node_config["memory_gb"]
+            storage_gb = node_config["storage_gb"]
+            bandwidth_mbps = node_config["bandwidth_mbps"]
+            host = node_config.get("host", "localhost")
+            port = node_config.get("port", None)  # None = auto-assign
+            
+            # Create the node
+            node = self.create_node(
+                node_id=node_id,
+                cpu_capacity=cpu_capacity,
+                memory_capacity=memory_gb,
+                storage_capacity=storage_gb,
+                bandwidth=bandwidth_mbps,
+                host=host,
+                port=port
+            )
+            
+            if node:
+                created_nodes.append(node)
+        
+        print(f"[NodeFactory] Created {len(created_nodes)} nodes from configuration")
+        return created_nodes
     
     def __repr__(self):
         """String representation of NodeFactory"""
