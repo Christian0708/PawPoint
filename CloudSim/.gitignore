@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/
+*.log
+
+# Storage (runtime data)
+storage/
+!storage/.gitkeep
+
+# State files
+nodes_state.json
+
+# Metrics exports
+metrics/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+

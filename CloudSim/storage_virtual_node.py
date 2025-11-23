@@ -3,6 +3,8 @@ import math
 import os
 import threading
 import signal
+import socket
+import json
 from concurrent.futures import ThreadPoolExecutor, Future
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union, Callable
@@ -43,7 +45,8 @@ class StorageVirtualNode(threading.Thread):
         storage_capacity: int,  # in GB
         bandwidth: int,  # in Mbps
         host: str = "localhost",
-        port: int = 5000
+        port: int = 5000,
+        enable_network_check: bool = True  # Enable network checking on boot
     ):
         # Initialize thread
         super().__init__(name=f"Node-{node_id}", daemon=True)
@@ -89,6 +92,13 @@ class StorageVirtualNode(threading.Thread):
         
         # Network manager for real network communication
         self.network_manager = NetworkManager(node_id, host, port)
+        
+        # Network service configuration
+        self.discovery_port = 9999  # Default discovery port
+        self.network_connected = False
+        self.enable_network_check = enable_network_check  # Whether to check for network
+        self.network_check_interval = 5.0  # Check for network every 5 seconds
+        self.network_check_timeout = 30.0  # Wait up to 30 seconds for network
         
         # Network listener thread (will be started separately)
         self.listener_thread: Optional[threading.Thread] = None
@@ -174,11 +184,29 @@ class StorageVirtualNode(threading.Thread):
         self.listener_thread.start()
         print(f"[{self.node_id}] Network listener thread started on {self.host}:{self.port}")
         
-        # Main node loop - will be extended in later commits
+        # Check for network and connect when available (if enabled)
+        if self.enable_network_check:
+            print(f"[{self.node_id}] Checking for network availability...")
+            network_found = self._check_and_connect_to_network()
+            
+            if network_found:
+                print(f"[{self.node_id}] Connected to cloud network")
+            else:
+                print(f"[{self.node_id}] Network not available. Node will continue checking...")
+        else:
+            print(f"[{self.node_id}] Network checking disabled")
+        
+        # Main node loop - periodically check for network if not connected
         while self.running and not self.stop_event.is_set() and not self.shutting_down:
             try:
+                # If network checking is enabled and not connected, check periodically
+                if self.enable_network_check and not self.network_connected:
+                    network_found = self._check_and_connect_to_network()
+                    if network_found:
+                        print(f"[{self.node_id}] Connected to cloud network")
+                
                 # Node autonomous operations will be added here
-                # For now, just check stop condition periodically
+                # Check stop condition periodically
                 self.stop_event.wait(timeout=1.0)  # Check every second
             except Exception as e:
                 print(f"[{self.node_id}] Error in node thread: {e}")
@@ -189,6 +217,110 @@ class StorageVirtualNode(threading.Thread):
             print(f"[{self.node_id}] Node thread stopping due to shutdown request")
         else:
             print(f"[{self.node_id}] Node thread stopped")
+    
+    def _check_and_connect_to_network(self) -> bool:
+        """
+        Check if network is available and connect to it
+        Returns True if network is found and connected
+        
+        Returns:
+            bool: True if network is available and connected
+        """
+        try:
+            # Create a UDP socket to query network
+            query_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            query_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            query_socket.settimeout(2.0)  # 2 second timeout
+            
+            # Send network query
+            query_msg = {
+                'type': 'NETWORK_QUERY',
+                'node_id': self.node_id,
+                'host': self.host,
+                'port': self.port
+            }
+            
+            # Try to send query and wait for response
+            query_socket.sendto(
+                json.dumps(query_msg).encode('utf-8'),
+                ('255.255.255.255', self.discovery_port)
+            )
+            
+            # Wait for network response
+            try:
+                data, addr = query_socket.recvfrom(4096)
+                response = json.loads(data.decode('utf-8'))
+                
+                if response.get('type') == 'NETWORK_RESPONSE' and response.get('network_available'):
+                    # Network is available, register this node
+                    self._register_with_network(addr[0])
+                    query_socket.close()
+                    return True
+            except socket.timeout:
+                # Network not responding, try to register anyway (network might be starting)
+                pass
+            
+            query_socket.close()
+            
+            # Try to register with network (might be starting up)
+            return self._register_with_network()
+            
+        except Exception as e:
+            # Network check failed, will retry later
+            return False
+    
+    def _register_with_network(self, network_host: str = '255.255.255.255') -> bool:
+        """
+        Register this node with the network
+        
+        Args:
+            network_host: Host address of the network service
+            
+        Returns:
+            bool: True if registration successful
+        """
+        try:
+            reg_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            reg_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            reg_socket.settimeout(2.0)
+            
+            # Send registration request
+            reg_msg = {
+                'type': 'NODE_REGISTER',
+                'node_id': self.node_id,
+                'host': self.host,
+                'port': self.port,
+                'cpu_capacity': self.cpu_capacity,
+                'memory_capacity': self.memory_capacity,
+                'storage_capacity': self.total_storage,
+                'bandwidth': self.bandwidth
+            }
+            
+            reg_socket.sendto(
+                json.dumps(reg_msg).encode('utf-8'),
+                (network_host, self.discovery_port)
+            )
+            
+            # Wait for confirmation
+            try:
+                data, addr = reg_socket.recvfrom(4096)
+                response = json.loads(data.decode('utf-8'))
+                
+                if response.get('type') == 'REGISTRATION_CONFIRMED':
+                    self.network_connected = True
+                    print(f"[{self.node_id}] Successfully registered with network")
+                    reg_socket.close()
+                    return True
+            except socket.timeout:
+                # No response, network might not be available yet
+                pass
+            
+            reg_socket.close()
+            return False
+            
+        except Exception as e:
+            print(f"[{self.node_id}] Error registering with network: {e}")
+            return False
     
     def register_shutdown_callback(self, callback: Callable[[], None]):
         """

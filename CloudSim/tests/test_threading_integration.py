@@ -3,10 +3,15 @@ Threading integration tests for CloudSim
 Tests thread safety, concurrent operations, and graceful shutdown
 """
 
+import sys
+import os
+
+# Add parent directory to path to import CloudSim modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import unittest
 import threading
 import time
-import os
 import shutil
 from storage_virtual_node import StorageVirtualNode, TransferStatus
 
@@ -16,7 +21,7 @@ class TestThreadingIntegration(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures before each test"""
-        # Create a test node
+        # Create a test node (disable network checking for tests)
         self.test_node = StorageVirtualNode(
             node_id="test_thread_node",
             cpu_capacity=4,
@@ -24,7 +29,8 @@ class TestThreadingIntegration(unittest.TestCase):
             storage_capacity=10,  # 10 GB
             bandwidth=1000,
             host="localhost",
-            port=6000  # Different port to avoid conflicts
+            port=6000,  # Different port to avoid conflicts
+            enable_network_check=False  # Disable network checking in tests
         )
         
     def tearDown(self):

@@ -5,12 +5,14 @@ Provides commands for managing nodes, monitoring metrics, and system operations
 
 import argparse
 import sys
+import time
 from typing import Optional
 from config_loader import ConfigLoader
 from node_factory import NodeFactory
 from metrics_collector import MetricsCollector
 from capacity_evaluator import CapacityEvaluator
 from logger import CloudSimLogger, get_logger
+from network_service import NetworkService
 
 
 class CloudSimCLI:
@@ -24,6 +26,7 @@ class CloudSimCLI:
         self.factory: Optional[NodeFactory] = None
         self.metrics: Optional[MetricsCollector] = None
         self.capacity: Optional[CapacityEvaluator] = None
+        self.network_service: Optional[NetworkService] = None
     
     def setup(self, config_path: str = "config.yaml"):
         """
@@ -48,6 +51,16 @@ class CloudSimCLI:
         self.metrics = MetricsCollector(self.factory)
         self.capacity = CapacityEvaluator(self.factory)
         
+        # Initialize network service (but don't start it automatically)
+        discovery_port = self.config.get("network.discovery.port", 9999)
+        broadcast_interval = self.config.get("network.discovery.broadcast_interval_seconds", 30.0)
+        network_name = self.config.get("network.name", "CloudSim_Storage_Network")
+        self.network_service = NetworkService(
+            discovery_port=discovery_port,
+            broadcast_interval=broadcast_interval,
+            network_name=network_name
+        )
+        
         self.logger.info("CLI components initialized")
     
     def cmd_start(self, args):
@@ -55,6 +68,7 @@ class CloudSimCLI:
         if not self.factory:
             self.setup()
         
+        # Save state after starting nodes
         if args.nodes:
             # Start specific nodes
             started = 0
@@ -81,10 +95,14 @@ class CloudSimCLI:
             # Start all nodes
             try:
                 self.factory.start_all_nodes()
-                print("✓ All nodes started")
+                print("[OK] All nodes started")
             except Exception as e:
-                print(f"✗ Error starting nodes: {e}")
+                print(f"[ERROR] Error starting nodes: {e}")
                 sys.exit(1)
+        
+        # If interactive mode, keep process alive
+        if hasattr(args, 'interactive') and args.interactive:
+            self._run_interactive_mode()
     
     def cmd_stop(self, args):
         """Stop nodes command"""
@@ -100,12 +118,12 @@ class CloudSimCLI:
                     try:
                         node.stop(graceful=args.graceful, timeout=args.timeout)
                         node.join(timeout=3.0)
-                        print(f"✓ Stopped node: {node_id}")
+                        print(f"[OK] Stopped node: {node_id}")
                         stopped += 1
                     except Exception as e:
-                        print(f"✗ Error stopping node {node_id}: {e}")
+                        print(f"[ERROR] Error stopping node {node_id}: {e}")
                 else:
-                    print(f"✗ Node {node_id} not found")
+                    print(f"[ERROR] Node {node_id} not found")
             
             if stopped > 0:
                 print(f"\nStopped {stopped} node(s)")
@@ -113,9 +131,9 @@ class CloudSimCLI:
             # Stop all nodes
             try:
                 self.factory.stop_all_nodes(graceful=args.graceful, timeout=args.timeout)
-                print("✓ All nodes stopped")
+                print("[OK] All nodes stopped")
             except Exception as e:
-                print(f"✗ Error stopping nodes: {e}")
+                print(f"[ERROR] Error stopping nodes: {e}")
                 sys.exit(1)
     
     def cmd_restart(self, args):
@@ -135,19 +153,19 @@ class CloudSimCLI:
                         node.join(timeout=3.0)
                         # Start
                         node.start()
-                        print(f"✓ Restarted node: {node_id}")
+                        print(f"[OK] Restarted node: {node_id}")
                     except Exception as e:
-                        print(f"✗ Error restarting node {node_id}: {e}")
+                        print(f"[ERROR] Error restarting node {node_id}: {e}")
                 else:
-                    print(f"✗ Node {node_id} not found")
+                    print(f"[ERROR] Node {node_id} not found")
         else:
             # Restart all nodes
             print("Restarting all nodes...")
             try:
                 self.factory.restart_all_nodes(graceful=args.graceful, timeout=args.timeout)
-                print("✓ All nodes restarted")
+                print("[OK] All nodes restarted")
             except Exception as e:
-                print(f"✗ Error restarting nodes: {e}")
+                print(f"[ERROR] Error restarting nodes: {e}")
                 sys.exit(1)
     
     def cmd_status(self, args):
@@ -177,7 +195,7 @@ class CloudSimCLI:
             print(f"\n{'='*60}")
             print(f"Node Status: {args.node}")
             print(f"{'='*60}")
-            print(f"Status:        {'✓ Running' if is_running else '✗ Stopped'}")
+            print(f"Status:        {'[RUNNING]' if is_running else '[STOPPED]'}")
             print(f"Host:          {config.get('host', 'unknown')}")
             print(f"Port:          {config.get('port', 'unknown')}")
             
@@ -199,38 +217,74 @@ class CloudSimCLI:
                 print(f"  Failed:      {performance.get('failed_transfers', 0)}")
                 print(f"  Active:      {performance.get('current_active_transfers', 0)}")
         else:
-            # Status of all nodes
-            stats = self.factory.get_factory_stats()
-            nodes = self.factory.get_all_nodes()
+            # Comprehensive system overview
+            self._show_system_overview()
+    
+    def _show_system_overview(self):
+        """Show comprehensive system overview including network and all nodes"""
+        print(f"\n{'='*80}")
+        print(f"CloudSim System Overview - Everything Running")
+        print(f"{'='*80}")
+        
+        # Network Status
+        if not self.network_service:
+            self.setup()
+        
+        network_status = self.network_service.get_network_status()
+        print(f"\n[NETWORK SERVICE]")
+        print(f"  Status:       {'[RUNNING]' if network_status['running'] else '[STOPPED]'}")
+        print(f"  Network:      {network_status['network_name']}")
+        print(f"  Discovery:   Port {network_status['discovery_port']}")
+        print(f"  Registered:  {network_status['registered_nodes']} node(s)")
+        
+        if network_status.get('nodes'):
+            print(f"  Registered Nodes:")
+            for node_id, node_info in network_status['nodes'].items():
+                print(f"    - {node_id}: {node_info['host']}:{node_info['port']}")
+        
+        # Node Factory Status
+        stats = self.factory.get_factory_stats()
+        nodes = self.factory.get_all_nodes()
+        
+        print(f"\n[NODES]")
+        print(f"  Total:        {stats['total_nodes']}")
+        print(f"  Running:      {stats['running_nodes']}")
+        print(f"  Stopped:      {stats['stopped_nodes']}")
+        
+        # Resource Summary
+        if stats['total_nodes'] > 0:
+            resources = self.factory.get_aggregated_resources()
+            print(f"\n[RESOURCES]")
+            print(f"  CPU:          {resources['total_cpu']} vCPUs")
+            print(f"  Memory:      {resources['total_memory_gb']} GB")
+            print(f"  Storage:     {resources['used_storage_gb']:.2f} GB / {resources['total_storage_gb']:.2f} GB")
+            print(f"  Utilization: {resources['storage_utilization_percent']:.2f}%")
+            print(f"  Bandwidth:   {resources['total_bandwidth_mbps']} Mbps")
+        
+        # Node Details
+        if nodes:
+            print(f"\n[NODE DETAILS]")
+            print(f"{'Node ID':<20} {'Status':<12} {'Host:Port':<20} {'Storage %':<12} {'Files':<10}")
+            print("-" * 80)
             
-            print(f"\n{'='*80}")
-            print(f"System Status Summary")
-            print(f"{'='*80}")
-            print(f"Total Nodes:   {stats['total_nodes']}")
-            print(f"Running:       {stats['running_nodes']}")
-            print(f"Stopped:       {stats['stopped_nodes']}")
-            
-            if nodes:
-                print(f"\n{'Node ID':<15} {'Status':<12} {'Storage %':<12} {'Files':<10} {'Transfers':<10}")
-                print("-" * 80)
+            for node in nodes:
+                node_id = node.node_id
+                is_running = node.is_alive() or node.running
+                status = "[RUNNING]" if is_running else "[STOPPED]"
+                config = self.factory.node_configs.get(node_id, {})
+                host_port = f"{config.get('host', 'unknown')}:{config.get('port', 'unknown')}"
                 
-                for node in nodes:
-                    node_id = node.node_id
-                    is_running = node.is_alive() or node.running
-                    status = "✓ Running" if is_running else "✗ Stopped"
-                    
-                    if is_running:
-                        storage_util = node.get_storage_utilization()
-                        performance = node.get_performance_metrics()
-                        storage_pct = f"{storage_util.get('utilization_percent', 0):.2f}%"
-                        files = storage_util.get('files_stored', 0)
-                        transfers = performance.get('total_requests_processed', 0)
-                    else:
-                        storage_pct = "N/A"
-                        files = 0
-                        transfers = 0
-                    
-                    print(f"{node_id:<15} {status:<12} {storage_pct:<12} {files:<10} {transfers:<10}")
+                if is_running:
+                    storage_util = node.get_storage_utilization()
+                    storage_pct = f"{storage_util.get('utilization_percent', 0):.2f}%"
+                    files = storage_util.get('files_stored', 0)
+                else:
+                    storage_pct = "N/A"
+                    files = 0
+                
+                print(f"{node_id:<20} {status:<12} {host_port:<20} {storage_pct:<12} {files:<10}")
+        
+        print(f"\n{'='*80}")
     
     def cmd_list(self, args):
         """List nodes command"""
@@ -251,7 +305,7 @@ class CloudSimCLI:
             for node in nodes:
                 node_id = node.node_id
                 is_running = node.is_alive() or node.running
-                status = "✓ Running" if is_running else "✗ Stopped"
+                status = "[RUNNING]" if is_running else "[STOPPED]"
                 config = self.factory.node_configs.get(node_id, {})
                 
                 host = config.get('host', 'unknown')
@@ -270,7 +324,7 @@ class CloudSimCLI:
             for node in nodes:
                 node_id = node.node_id
                 is_running = node.is_alive() or node.running
-                status = "✓ Running" if is_running else "✗ Stopped"
+                status = "[RUNNING]" if is_running else "[STOPPED]"
                 host = node.host
                 port = node.port
                 
@@ -385,16 +439,76 @@ class CloudSimCLI:
         if not self.factory:
             self.setup()
         
-        config_file = self.config.get("nodes.config_file", "nodes_config.json")
-        nodes = self.factory.create_nodes_from_config(config_file)
+        created_nodes = []
         
-        if nodes:
-            print(f"Created {len(nodes)} nodes")
+        # If node specifications are provided, create node with those specs
+        if args.node_id:
+            try:
+                node = self.factory.create_node(
+                    node_id=args.node_id,
+                    cpu_capacity=args.cpu or 2,
+                    memory_capacity=args.memory or 4,
+                    storage_capacity=args.storage or 10,
+                    bandwidth=args.bandwidth or 100,
+                    host=args.host or "localhost",
+                    port=args.port
+                )
+                if node:
+                    created_nodes.append(node)
+                    print(f"Created node: {args.node_id}")
+                    print(f"  Host: {args.host or 'localhost'}")
+                    print(f"  Port: {node.port}")
+                    print(f"  CPU: {args.cpu or 2} vCPUs")
+                    print(f"  Memory: {args.memory or 4} GB")
+                    print(f"  Storage: {args.storage or 10} GB")
+                    print(f"  Bandwidth: {args.bandwidth or 100} Mbps")
+            except Exception as e:
+                print(f"Error creating node {args.node_id}: {e}")
+                import traceback
+                traceback.print_exc()
+                return
+        
+        # If count is specified, create multiple nodes with same specs
+        elif args.count and args.count > 0:
+            base_id = args.base_id or "node"
+            for i in range(args.count):
+                node_id = f"{base_id}{i+1}"
+                try:
+                    node = self.factory.create_node(
+                        node_id=node_id,
+                        cpu_capacity=args.cpu or 2,
+                        memory_capacity=args.memory or 4,
+                        storage_capacity=args.storage or 10,
+                        bandwidth=args.bandwidth or 100,
+                        host=args.host or "localhost",
+                        port=None  # Auto-assign ports for multiple nodes
+                    )
+                    if node:
+                        created_nodes.append(node)
+                        print(f"Created node: {node_id} on port {node.port}")
+                except Exception as e:
+                    print(f"Error creating node {node_id}: {e}")
+        
+        # If no node specs provided, show usage
+        else:
+            print("Error: Node specifications required.")
+            print("\nUsage examples:")
+            print("  # Create a single node")
+            print("  python cli.py create --node-id node1 --cpu 4 --memory 8 --storage 50 --bandwidth 500 --start")
+            print("\n  # Create multiple nodes with same specs")
+            print("  python cli.py create --count 3 --cpu 2 --memory 4 --storage 20 --bandwidth 100 --start")
+            print("\nUse --help for all options")
+            return
+        
+        if created_nodes:
+            print(f"\nCreated {len(created_nodes)} node(s)")
             if args.start:
                 self.factory.start_all_nodes()
                 print("All nodes started")
+                print("\n[INFO] Nodes are running. Use 'python cli.py status' to check their status.")
+                print("       To keep nodes running, use 'python cli.py start --interactive'")
         else:
-            print("No nodes created")
+            print("No nodes created.")
     
     def cmd_metrics(self, args):
         """Metrics command"""
@@ -449,6 +563,188 @@ class CloudSimCLI:
             print(f"Total Nodes: {summary['node_count']}")
             print(f"Storage Utilization: {summary['overall_capacity']['storage_capacity']['utilization_percent']:.2f}%")
     
+    def cmd_network(self, args):
+        """Network service command"""
+        if not self.network_service:
+            self.setup()
+        
+        if args.action == "start":
+            if self.network_service.running:
+                print("Network service is already running")
+            else:
+                self.network_service.start()
+                if self.network_service.running:
+                    print("Network service started")
+                    print(f"  Network: {self.network_service.network_name}")
+                    print(f"  Discovery Port: {self.network_service.discovery_port}")
+                    print("  Nodes can now connect to the cloud")
+                else:
+                    print("Failed to start network service")
+                    return
+            
+            # Keep process alive for network (network needs to stay running)
+            # Otherwise the daemon threads will die when CLI process exits
+            self._run_network_interactive_mode()
+        
+        elif args.action == "stop":
+            # Check if network is running in this process
+            if self.network_service.running:
+                self.network_service.stop()
+                print("Network service stopped (this process)")
+            else:
+                # Check if network is running in another process
+                status = self.network_service.get_network_status()
+                if status.get('running_in_another_process'):
+                    print("Network is running in another process. Attempting to stop it...")
+                    success = self._stop_network_in_other_process()
+                    if success:
+                        print("Network service stopped in other process")
+                    else:
+                        print("[WARNING] Could not stop network in other process via message.")
+                        print("         You may need to:")
+                        print("         1. Find the terminal running 'python main.py' or 'network start'")
+                        print("         2. Press Ctrl+C in that terminal")
+                        print("         3. Or kill Python processes: Get-Process python | Stop-Process -Force")
+                else:
+                    print("Network service is not running")
+        
+        elif args.action == "status":
+            status = self.network_service.get_network_status()
+            print("\n=== Network Status ===")
+            print(f"Network Name: {status['network_name']}")
+            print(f"Running: {status['running']}")
+            print(f"Available: {status['network_available']}")
+            print(f"Discovery Port: {status['discovery_port']}")
+            print(f"Registered Nodes: {status['registered_nodes']}")
+            
+            # Show additional info if network is running in another process
+            if status.get('running_in_another_process'):
+                print("\n[WARNING] Network is running in ANOTHER process!")
+                print("         This CLI instance cannot stop it.")
+                print("         To stop it:")
+                print("         1. Find the terminal running 'python main.py' or 'network start --interactive'")
+                print("         2. Press Ctrl+C in that terminal")
+                print("         3. Or kill the Python process: Get-Process python | Stop-Process -Force")
+            
+            if status['nodes']:
+                print("\nRegistered Nodes:")
+                for node_id, node_info in status['nodes'].items():
+                    print(f"  - {node_id}: {node_info['host']}:{node_info['port']}")
+    
+    def _stop_network_in_other_process(self) -> bool:
+        """Attempt to stop network service running in another process by sending shutdown message"""
+        try:
+            import socket
+            import json
+            
+            # Send shutdown message to network service
+            shutdown_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            shutdown_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            shutdown_socket.settimeout(2.0)
+            
+            shutdown_msg = {
+                'type': 'NETWORK_SHUTDOWN',
+                'source': 'cli_stop_command',
+                'timestamp': time.time()
+            }
+            
+            # Try to send to localhost first, then broadcast
+            try:
+                shutdown_socket.sendto(
+                    json.dumps(shutdown_msg).encode('utf-8'),
+                    ('127.0.0.1', self.network_service.discovery_port)
+                )
+                # Wait a moment for shutdown to process
+                time.sleep(1.0)
+                shutdown_socket.close()
+                
+                # Check if network is still running
+                time.sleep(0.5)
+                status = self.network_service.get_network_status()
+                if not status.get('running'):
+                    return True
+            except Exception as e:
+                shutdown_socket.close()
+                return False
+            
+            return False
+        except Exception as e:
+            print(f"[ERROR] Error sending shutdown message: {e}")
+            return False
+    
+    def _run_network_interactive_mode(self):
+        """Run in interactive mode to keep network service alive"""
+        import signal
+        import time
+        
+        print("\n" + "="*70)
+        print("Interactive Mode - Network service is running")
+        print("Press Ctrl+C to stop the network service and exit")
+        print("="*70 + "\n")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\n\nShutting down network service...")
+            try:
+                if self.network_service:
+                    self.network_service.stop()
+            except Exception as e:
+                print(f"Error during shutdown: {e}")
+            print("Exiting...")
+            sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Keep process alive
+        try:
+            while True:
+                time.sleep(1)
+                # Check if network service is still running
+                if self.network_service and not self.network_service.running:
+                    print("\nNetwork service stopped unexpectedly. Exiting...")
+                    break
+        except KeyboardInterrupt:
+            signal_handler(None, None)
+    
+    def _run_interactive_mode(self):
+        """Run in interactive mode to keep nodes alive"""
+        import signal
+        import time
+        
+        print("\n" + "="*70)
+        print("Interactive Mode - Nodes are running")
+        print("Press Ctrl+C to stop all nodes and exit")
+        print("="*70 + "\n")
+        
+        # Set up signal handler for graceful shutdown
+        def signal_handler(sig, frame):
+            print("\n\nShutting down all nodes...")
+            try:
+                if self.factory:
+                    self.factory.stop_all_nodes(graceful=True, timeout=5.0)
+            except Exception as e:
+                print(f"Error during shutdown: {e}")
+            print("Exiting...")
+            sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Keep process alive
+        try:
+            while True:
+                time.sleep(1)
+                # Check if any nodes are still running
+                if self.factory:
+                    running = sum(1 for node in self.factory.get_all_nodes() 
+                                if node.is_alive() or node.running)
+                    if running == 0:
+                        print("\nAll nodes have stopped. Exiting...")
+                        break
+        except KeyboardInterrupt:
+            signal_handler(None, None)
+    
     def create_parser(self) -> argparse.ArgumentParser:
         """Create argument parser with all commands"""
         parser = argparse.ArgumentParser(
@@ -461,6 +757,8 @@ class CloudSimCLI:
         # Start command
         start_parser = subparsers.add_parser('start', help='Start nodes')
         start_parser.add_argument('nodes', nargs='*', help='Node IDs to start (all if not specified)')
+        start_parser.add_argument('--interactive', '-i', action='store_true', 
+                                help='Keep process running in interactive mode')
         start_parser.set_defaults(func=self.cmd_start)
         
         # Stop command
@@ -493,8 +791,31 @@ class CloudSimCLI:
         info_parser.set_defaults(func=self.cmd_info)
         
         # Create command
-        create_parser = subparsers.add_parser('create', help='Create nodes from config')
+        create_parser = subparsers.add_parser('create', 
+            help='Create nodes with custom specifications',
+            description='Create nodes with your own specifications',
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+Examples:
+  # Create a single node with custom specs
+  python cli.py create --node-id node1 --cpu 4 --memory 8 --storage 50 --bandwidth 500 --start
+  
+  # Create multiple nodes with same specs
+  python cli.py create --count 3 --cpu 2 --memory 4 --storage 20 --bandwidth 100 --start
+  
+  # Create with custom base ID prefix
+  python cli.py create --count 5 --base-id worker --cpu 4 --memory 8 --storage 50 --bandwidth 500 --start
+            """)
         create_parser.add_argument('--start', action='store_true', help='Start nodes after creation')
+        create_parser.add_argument('--node-id', type=str, help='Node ID for single node creation')
+        create_parser.add_argument('--count', type=int, help='Number of nodes to create (for batch creation)')
+        create_parser.add_argument('--base-id', type=str, help='Base ID prefix for batch creation (default: "node")')
+        create_parser.add_argument('--host', type=str, default='localhost', help='Host address (default: localhost)')
+        create_parser.add_argument('--port', type=int, help='Port number (auto-assigned if not specified)')
+        create_parser.add_argument('--cpu', type=int, help='CPU capacity in vCPUs (default: 2)')
+        create_parser.add_argument('--memory', type=int, help='Memory capacity in GB (default: 4)')
+        create_parser.add_argument('--storage', type=int, help='Storage capacity in GB (default: 10)')
+        create_parser.add_argument('--bandwidth', type=int, help='Bandwidth in Mbps (default: 100)')
         create_parser.set_defaults(func=self.cmd_create)
         
         # Metrics command
@@ -509,6 +830,12 @@ class CloudSimCLI:
         capacity_parser = subparsers.add_parser('capacity', help='Show capacity information')
         capacity_parser.add_argument('--report', action='store_true', help='Generate full capacity report')
         capacity_parser.set_defaults(func=self.cmd_capacity)
+        
+        # Network command
+        network_parser = subparsers.add_parser('network', help='Manage network service (start/stop/status)')
+        network_parser.add_argument('action', choices=['start', 'stop', 'status'], 
+                                   help='Network action: start, stop, or status')
+        network_parser.set_defaults(func=self.cmd_network)
         
         return parser
     

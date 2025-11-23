@@ -3,8 +3,13 @@ Integration Tests - End-to-end tests for CloudSim distributed storage system
 Tests complete workflows and multi-node scenarios
 """
 
-import unittest
+import sys
 import os
+
+# Add parent directory to path to import CloudSim modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import unittest
 import shutil
 import time
 import tempfile
@@ -32,7 +37,7 @@ class TestEndToEndIntegration(unittest.TestCase):
         # Create factory
         self.factory = NodeFactory(start_port=6000, port_range_size=100)
         
-        # Create test nodes
+        # Create test nodes (disable network checking for tests)
         self.node1 = self.factory.create_node(
             node_id="test_node1",
             cpu_capacity=2,
@@ -40,7 +45,8 @@ class TestEndToEndIntegration(unittest.TestCase):
             storage_capacity=10,  # 10 GB
             bandwidth=100,  # 100 Mbps
             host="localhost",
-            port=6000
+            port=6000,
+            enable_network_check=False  # Disable network checking in tests
         )
         
         self.node2 = self.factory.create_node(
@@ -50,7 +56,8 @@ class TestEndToEndIntegration(unittest.TestCase):
             storage_capacity=10,
             bandwidth=100,
             host="localhost",
-            port=6001
+            port=6001,
+            enable_network_check=False  # Disable network checking in tests
         )
         
         self.node3 = self.factory.create_node(
@@ -60,7 +67,8 @@ class TestEndToEndIntegration(unittest.TestCase):
             storage_capacity=10,
             bandwidth=100,
             host="localhost",
-            port=6002
+            port=6002,
+            enable_network_check=False  # Disable network checking in tests
         )
         
         # Start nodes
@@ -366,7 +374,7 @@ class TestEndToEndIntegration(unittest.TestCase):
             }
         ]
         
-        created = self.factory.create_nodes_batch(node_configs)
+        created = self.factory.create_nodes_batch(node_configs, enable_network_check=False)
         self.assertEqual(len(created), 2)
         
         # Test bulk removal
@@ -559,7 +567,8 @@ metrics:
             storage_capacity=5,
             bandwidth=50,
             host="localhost",
-            port=None  # Auto-assign
+            port=None,  # Auto-assign
+            enable_network_check=False  # Disable network checking in tests
         )
         
         self.assertIsNotNone(auto_node)

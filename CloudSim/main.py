@@ -1,329 +1,277 @@
 """
-CloudSim Distributed Storage System - Main Entry Point
-Demonstrates all features of the distributed storage system
+CloudSim Distributed Storage System - Service Entry Point
+Sets up and runs the cloud infrastructure service
 
-This example shows:
-- Node creation using NodeFactory
-- Configuration management
-- Metrics collection
-- Capacity evaluation
-- Node discovery
-- File transfers with real storage
-- Performance monitoring
+This service:
+- Starts the network service
+- Loads existing nodes from state
+- Starts all system components (metrics, capacity evaluation)
+- Keeps the system running for CLI operations
 """
 
 import time
 import sys
+import signal
+import io
+
+# Set UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 from config_loader import ConfigLoader
 from node_factory import NodeFactory
-from metrics_collector import MetricsCollector, MetricType
+from metrics_collector import MetricsCollector
 from capacity_evaluator import CapacityEvaluator, AlertLevel
 from logger import CloudSimLogger, get_logger
+from network_service import NetworkService
+
+
+class CloudSimService:
+    """Main service that runs the CloudSim infrastructure"""
+    
+    def __init__(self, config_path: str = "config.yaml"):
+        """Initialize the service"""
+        self.config_path = config_path
+        self.config: ConfigLoader = None
+        self.factory: NodeFactory = None
+        self.metrics: MetricsCollector = None
+        self.capacity: CapacityEvaluator = None
+        self.network_service: NetworkService = None
+        self.logger = None
+        self.running = False
+    
+    def initialize(self):
+        """Initialize all system components"""
+        print("="*80)
+        print("CloudSim Distributed Storage System - Service")
+        print("="*80)
+        print()
+        
+        # Load configuration
+        print("[1/6] Loading configuration...")
+        self.config = ConfigLoader(self.config_path)
+        self.config.load()
+        
+        # Setup logging
+        CloudSimLogger.setup_logging(self.config)
+        self.logger = get_logger("CloudSim.Service")
+        self.logger.info("Initializing CloudSim service")
+        print("[OK] Configuration loaded")
+        print()
+        
+        # Initialize NodeFactory (loads existing nodes from state)
+        print("[2/6] Initializing node factory...")
+        start_port = self.config.get("node_factory.start_port", 5000)
+        port_range = self.config.get("node_factory.port_range_size", 1000)
+        self.factory = NodeFactory(start_port=start_port, port_range_size=port_range)
+        print(f"[OK] NodeFactory initialized (loaded {len(self.factory.get_all_nodes())} node(s) from state)")
+        print()
+        
+        # Initialize MetricsCollector
+        print("[3/6] Initializing metrics collector...")
+        max_history = self.config.get("metrics.max_history", 1000)
+        self.metrics = MetricsCollector(self.factory, max_history=max_history)
+        print("[OK] MetricsCollector initialized")
+        print()
+        
+        # Initialize CapacityEvaluator
+        print("[4/6] Initializing capacity evaluator...")
+        self.capacity = CapacityEvaluator(self.factory)
+        
+        # Configure capacity thresholds from config
+        capacity_thresholds = self.config.get("capacity.thresholds.global", [])
+        for threshold in capacity_thresholds:
+            percent = threshold.get("percent", 0)
+            level_str = threshold.get("level", "INFO")
+            level = getattr(AlertLevel, level_str.upper(), AlertLevel.INFO)
+            description = threshold.get("description", "")
+            self.capacity.add_threshold(percent, level, description)
+        
+        print(f"[OK] CapacityEvaluator initialized ({len(capacity_thresholds)} thresholds configured)")
+        print()
+        
+        # Initialize NetworkService
+        print("[5/6] Initializing network service...")
+        discovery_port = self.config.get("network.discovery.port", 9999)
+        broadcast_interval = self.config.get("network.discovery.broadcast_interval_seconds", 30.0)
+        network_name = self.config.get("network.name", "CloudSim_Storage_Network")
+        self.network_service = NetworkService(
+            discovery_port=discovery_port,
+            broadcast_interval=broadcast_interval,
+            network_name=network_name
+        )
+        print("[OK] NetworkService initialized")
+        print()
+        
+        # Start network service
+        print("[6/6] Starting network service...")
+        self.network_service.start()
+        if self.network_service.running:
+            print(f"[OK] Network service started on port {discovery_port}")
+        else:
+            print("[WARNING] Network service failed to start")
+        print()
+    
+    def start(self):
+        """Start all system components"""
+        if self.running:
+            print("[WARNING] Service is already running")
+            return
+        
+        self.running = True
+        
+        # Start existing nodes
+        existing_nodes = self.factory.get_all_nodes()
+        if existing_nodes:
+            print(f"Starting {len(existing_nodes)} existing node(s)...")
+            self.factory.start_all_nodes()
+            print(f"[OK] Started {len(existing_nodes)} node(s)")
+            # Wait for nodes to initialize
+            time.sleep(2)
+        else:
+            print("[INFO] No nodes found. Create nodes using CLI:")
+            print("  python cli.py create --node-id node1 --cpu 4 --memory 8 --storage 50 --bandwidth 500 --start")
+        print()
+        
+        # Start metrics collection
+        metrics_enabled = self.config.get("metrics.enabled", True)
+        if metrics_enabled:
+            collection_interval = self.config.get("metrics.collection_interval_seconds", 5.0)
+            self.metrics.start_auto_collection(interval=collection_interval)
+            print(f"[OK] Metrics collection started (interval: {collection_interval}s)")
+        print()
+        
+        # Enable node discovery if configured
+        discovery_enabled = self.config.get("network.discovery.enabled", True)
+        if discovery_enabled and existing_nodes:
+            discovery_port = self.config.get("network.discovery.port", 9999)
+            broadcast_interval = self.config.get("network.discovery.broadcast_interval_seconds", 30.0)
+            self.factory.enable_discovery(discovery_port=discovery_port, broadcast_interval=broadcast_interval)
+            print(f"[OK] Node discovery enabled")
+        print()
+        
+        # Display system status
+        self._display_status()
+    
+    def _display_status(self):
+        """Display current system status"""
+        print("="*80)
+        print("System Status")
+        print("="*80)
+        
+        # Network status
+        network_status = self.network_service.get_network_status()
+        print(f"Network: {network_status['network_name']} - {'Running' if network_status['running'] else 'Stopped'}")
+        print(f"  Discovery Port: {network_status['discovery_port']}")
+        print(f"  Registered Nodes: {network_status['registered_nodes']}")
+        
+        # Factory stats
+        factory_stats = self.factory.get_factory_stats()
+        print(f"\nNodes: {factory_stats['total_nodes']} total, {factory_stats['running_nodes']} running")
+        
+        if factory_stats['total_nodes'] > 0:
+            resources = self.factory.get_aggregated_resources()
+            print(f"Resources: {resources['total_cpu']} vCPUs, {resources['total_memory_gb']} GB RAM")
+            print(f"Storage: {resources['used_storage_gb']:.2f} GB / {resources['total_storage_gb']:.2f} GB ({resources['storage_utilization_percent']:.2f}%)")
+        
+        print()
+        print("="*80)
+        print("Service is running. Use CLI commands in a SEPARATE TERMINAL to manage nodes.")
+        print("This terminal is now blocked - open a new terminal window for CLI commands.")
+        print("Press Ctrl+C in this terminal to stop the service.")
+        print("="*80)
+        print()
+    
+    def stop(self):
+        """Stop all system components gracefully"""
+        if not self.running:
+            return
+        
+        print("\nShutting down CloudSim service...")
+        self.running = False
+        
+        # Stop metrics collection
+        if self.metrics:
+            self.metrics.stop_auto_collection()
+            print("[OK] Metrics collection stopped")
+        
+        # Stop all nodes
+        if self.factory:
+            self.factory.stop_all_nodes(graceful=True, timeout=5.0)
+            print("[OK] All nodes stopped")
+        
+        # Stop network service
+        if self.network_service:
+            self.network_service.stop()
+            print("[OK] Network service stopped")
+        
+        print("[OK] Service shutdown complete")
+    
+    def run(self):
+        """Run the service (keeps process alive)"""
+        # Set up signal handlers for graceful shutdown
+        def signal_handler(sig, frame):
+            self.stop()
+            sys.exit(0)
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Keep process alive
+        try:
+            while self.running:
+                time.sleep(1)
+                # Check if network service is still running
+                if self.network_service and not self.network_service.running:
+                    print("[WARNING] Network service stopped unexpectedly")
+                    break
+        except KeyboardInterrupt:
+            signal_handler(None, None)
 
 
 def main():
-    """
-    Main demonstration of CloudSim distributed storage system
-    """
-    print("="*80)
-    print("CloudSim Distributed Storage System - Real-World Example")
-    print("="*80)
-    print()
+    """Main entry point for CloudSim service"""
+    import argparse
     
-    # Setup logging
-    config = ConfigLoader("config.yaml")
-    config.load()
-    CloudSimLogger.setup_logging(config)
-    logger = get_logger("CloudSim.main")
-    logger.info("Starting CloudSim demonstration")
+    parser = argparse.ArgumentParser(description="CloudSim Distributed Storage System Service")
+    parser.add_argument('--daemon', '-d', action='store_true', 
+                       help='Run as daemon (Windows: runs in background, Unix: forks to background)')
+    args = parser.parse_args()
     
-    # ============================================================================
-    # Step 1: Initialize System Components
-    # ============================================================================
-    print("Step 1: Initializing system components...")
+    service = CloudSimService()
     
-    # Create NodeFactory with configuration
-    start_port = config.get("node_factory.start_port", 5000)
-    port_range = config.get("node_factory.port_range_size", 1000)
-    factory = NodeFactory(start_port=start_port, port_range_size=port_range)
-    
-    # Create MetricsCollector
-    metrics = MetricsCollector(factory, max_history=1000)
-    
-    # Create CapacityEvaluator
-    capacity = CapacityEvaluator(factory)
-    
-    print("✓ System components initialized")
-    print()
-    
-    # ============================================================================
-    # Step 2: Create Nodes from Configuration
-    # ============================================================================
-    print("Step 2: Creating nodes from configuration...")
-    
-    nodes_config_file = config.get("nodes.config_file", "nodes_config.json")
-    created_nodes = factory.create_nodes_from_config(nodes_config_file)
-    
-    if not created_nodes:
-        print("✗ No nodes created. Please check nodes_config.json")
+    try:
+        # Initialize system
+        service.initialize()
+        
+        # Start all components
+        service.start()
+        
+        if args.daemon:
+            # Run in background (Windows-compatible)
+            if sys.platform == 'win32':
+                print("\n[INFO] Running in background mode on Windows")
+                print("[INFO] Service is running. Use another terminal for CLI commands.")
+                print("[INFO] To stop the service, use: python -c \"import os; os.kill(os.getpid(), signal.SIGTERM)\"")
+                print("[INFO] Or find the process and kill it manually.\n")
+            else:
+                # Unix daemon mode
+                import daemon
+                with daemon.DaemonContext():
+                    service.run()
+            return
+        
+        # Keep service running (foreground)
+        service.run()
+        
+    except Exception as e:
+        print(f"\n[ERROR] Service error: {e}")
+        import traceback
+        traceback.print_exc()
+        service.stop()
         sys.exit(1)
-    
-    print(f"✓ Created {len(created_nodes)} nodes:")
-    for node in created_nodes:
-        config_data = factory.node_configs.get(node.node_id, {})
-        print(f"  - {node.node_id}: {config_data.get('host', 'unknown')}:{config_data.get('port', 'unknown')}")
-    print()
-    
-    # ============================================================================
-    # Step 3: Enable Node Discovery
-    # ============================================================================
-    print("Step 3: Enabling node discovery...")
-    
-    discovery_enabled = config.get("network.discovery.enabled", True)
-    if discovery_enabled:
-        discovery_port = config.get("network.discovery.port", 9999)
-        broadcast_interval = config.get("network.discovery.broadcast_interval_seconds", 30.0)
-        factory.enable_discovery(discovery_port=discovery_port, broadcast_interval=broadcast_interval)
-        print(f"✓ Node discovery enabled on port {discovery_port}")
-    else:
-        print("○ Node discovery disabled in configuration")
-    print()
-    
-    # ============================================================================
-    # Step 4: Start All Nodes
-    # ============================================================================
-    print("Step 4: Starting all nodes...")
-    
-    factory.start_all_nodes()
-    print("✓ All nodes started")
-    
-    # Wait a moment for nodes to initialize
-    time.sleep(2)
-    print()
-    
-    # ============================================================================
-    # Step 5: Setup Capacity Evaluation
-    # ============================================================================
-    print("Step 5: Setting up capacity evaluation...")
-    
-    # Configure capacity thresholds from config
-    capacity_thresholds = config.get("capacity.thresholds.global", [])
-    for threshold in capacity_thresholds:
-        percent = threshold.get("percent", 0)
-        level_str = threshold.get("level", "INFO")
-        level = getattr(AlertLevel, level_str.upper(), AlertLevel.INFO)
-        description = threshold.get("description", "")
-        capacity.add_threshold(percent, level, description)
-    
-    print(f"✓ Configured {len(capacity_thresholds)} capacity thresholds")
-    print()
-    
-    # ============================================================================
-    # Step 6: Start Metrics Collection
-    # ============================================================================
-    print("Step 6: Starting metrics collection...")
-    
-    metrics_enabled = config.get("metrics.enabled", True)
-    if metrics_enabled:
-        collection_interval = config.get("metrics.collection_interval_seconds", 5.0)
-        metrics.start_auto_collection(interval=collection_interval)
-        print(f"✓ Metrics collection started (interval: {collection_interval}s)")
-    else:
-        print("○ Metrics collection disabled in configuration")
-    print()
-    
-    # ============================================================================
-    # Step 7: Display Initial System Status
-    # ============================================================================
-    print("Step 7: Initial system status...")
-    print("-" * 80)
-    
-    # Factory stats
-    factory_stats = factory.get_factory_stats()
-    print(f"Total Nodes: {factory_stats['total_nodes']}")
-    print(f"Running: {factory_stats['running_nodes']}")
-    print(f"Stopped: {factory_stats['stopped_nodes']}")
-    
-    # Resource summary
-    resources = factory.get_aggregated_resources()
-    print(f"\nTotal Resources:")
-    print(f"  CPU: {resources['total_cpu']} vCPUs")
-    print(f"  Memory: {resources['total_memory_gb']} GB")
-    print(f"  Storage: {resources['total_storage_gb']} GB")
-    print(f"  Bandwidth: {resources['total_bandwidth_mbps']} Mbps")
-    print(f"\nStorage Utilization: {resources['storage_utilization_percent']:.2f}%")
-    print()
-    
-    # ============================================================================
-    # Step 8: Demonstrate File Transfer (if nodes are available)
-    # ============================================================================
-    print("Step 8: Demonstrating file transfer capabilities...")
-    print("-" * 80)
-    
-    if len(created_nodes) >= 2:
-        source_node = created_nodes[0]
-        target_node = created_nodes[1]
-        
-        print(f"Source: {source_node.node_id}")
-        print(f"Target: {target_node.node_id}")
-        
-        # Simulate a file transfer
-        file_size = 10 * 1024 * 1024  # 10MB
-        file_name = "demo_file.dat"
-        
-        # This would normally be done through the network manager
-        # For demonstration, we'll show the concept
-        print(f"\nSimulating transfer of {file_name} ({file_size / (1024*1024):.2f} MB)...")
-        print("(In a real scenario, this would use NetworkManager for actual transfer)")
-        print()
-    else:
-        print("○ Need at least 2 nodes for file transfer demonstration")
-        print()
-    
-    # ============================================================================
-    # Step 9: Monitor Metrics
-    # ============================================================================
-    print("Step 9: Collecting metrics...")
-    print("-" * 80)
-    
-    # Collect metrics from all nodes
-    network_metrics = metrics.collect_all_nodes_metrics()
-    print(f"Network Metrics (timestamp: {network_metrics.timestamp}):")
-    print(f"  Total Throughput: {network_metrics.total_throughput_mbps:.2f} Mbps")
-    print(f"  Average Latency: {network_metrics.average_latency_ms:.2f} ms")
-    print(f"  Total Transfers: {network_metrics.total_transfers}")
-    print(f"  Storage Utilization: {network_metrics.total_storage_utilization_percent:.2f}%")
-    print()
-    
-    # ============================================================================
-    # Step 10: Capacity Evaluation
-    # ============================================================================
-    print("Step 10: Evaluating capacity...")
-    print("-" * 80)
-    
-    # Take capacity snapshot
-    snapshot = capacity.take_capacity_snapshot(check_thresholds=True)
-    print(f"✓ Capacity snapshot taken")
-    
-    # Get capacity summary
-    summary = capacity.get_capacity_summary()
-    print(f"\nCapacity Summary:")
-    print(f"  Total Nodes: {summary['node_count']}")
-    print(f"  Average Utilization: {summary['utilization_statistics']['average_utilization']:.2f}%")
-    
-    highest = summary['utilization_statistics']['highest_utilization']
-    if highest['node_id']:
-        print(f"  Highest Utilization: {highest['node_id']} at {highest['utilization_percent']:.2f}%")
-    print()
-    
-    # ============================================================================
-    # Step 11: Check Discovered Nodes
-    # ============================================================================
-    if discovery_enabled:
-        print("Step 11: Checking discovered nodes...")
-        print("-" * 80)
-        
-        # Wait a bit for discovery to work
-        time.sleep(3)
-        
-        discovered = factory.get_discovered_nodes()
-        for node_id, discovery_info in discovered.items():
-            discovered_nodes = discovery_info.get('discovered_nodes', [])
-            if discovered_nodes:
-                print(f"Node {node_id} discovered:")
-                for disc_node in discovered_nodes:
-                    print(f"  - {disc_node['node_id']} at {disc_node['host']}:{disc_node['port']}")
-        print()
-    
-    # ============================================================================
-    # Step 12: Display Final Statistics
-    # ============================================================================
-    print("Step 12: Final system statistics...")
-    print("-" * 80)
-    
-    # Factory stats
-    final_stats = factory.get_factory_stats()
-    print(f"Nodes: {final_stats['total_nodes']} total, {final_stats['running_nodes']} running")
-    
-    # Resource summary
-    final_resources = factory.get_aggregated_resources()
-    print(f"Storage: {final_resources['used_storage_gb']:.2f} GB / {final_resources['total_storage_gb']:.2f} GB")
-    print(f"Utilization: {final_resources['storage_utilization_percent']:.2f}%")
-    
-    # Port info
-    port_info = factory.get_port_info()
-    print(f"Ports: {port_info['total_used']} used in range {port_info['port_range']}")
-    print()
-    
-    # ============================================================================
-    # Step 13: Export Metrics (if enabled)
-    # ============================================================================
-    metrics_auto_export = config.get("metrics.auto_export", False)
-    if metrics_auto_export:
-        print("Step 13: Exporting metrics...")
-        print("-" * 80)
-        
-        export_dir = config.get("metrics.export_directory", "metrics")
-        export_format = config.get("metrics.export_format", "json")
-        
-        exported_files = metrics.export_all_metrics(output_dir=export_dir, format=export_format)
-        print(f"✓ Exported {len(exported_files)} metric files to {export_dir}/")
-        print()
-    
-    # ============================================================================
-    # Step 14: Generate Capacity Report
-    # ============================================================================
-    print("Step 14: Generating capacity report...")
-    print("-" * 80)
-    
-    report = capacity.generate_capacity_report(
-        include_predictions=True,
-        include_alerts=True,
-        include_history=False
-    )
-    
-    print("Capacity Report Summary:")
-    storage_cap = report['total_capacity']['storage_capacity']
-    print(f"  Total Storage: {storage_cap['total_gb']} GB")
-    print(f"  Used: {storage_cap['used_gb']} GB")
-    print(f"  Available: {storage_cap['available_gb']} GB")
-    print(f"  Utilization: {storage_cap['utilization_percent']:.2f}%")
-    
-    if 'alerts' in report and report['alerts']['summary']['total_alerts'] > 0:
-        alert_summary = report['alerts']['summary']
-        print(f"\n  Alerts: {alert_summary['total_alerts']} total")
-        print(f"    Critical: {alert_summary['critical_count']}")
-        print(f"    Warning: {alert_summary['warning_count']}")
-    print()
-    
-    # ============================================================================
-    # Cleanup and Shutdown
-    # ============================================================================
-    print("="*80)
-    print("Demonstration complete!")
-    print("="*80)
-    print()
-    print("To keep the system running, comment out the shutdown section below.")
-    print("Or use the CLI to manage nodes: python -m CloudSim.cli --help")
-    print()
-    
-    # Uncomment the following lines to automatically shut down:
-    # print("Shutting down system...")
-    # metrics.stop_auto_collection()
-    # factory.stop_all_nodes(graceful=True, timeout=5.0)
-    # print("✓ System shut down")
-    
-    logger.info("CloudSim demonstration completed")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n\nInterrupted by user")
-        sys.exit(0)
-    except Exception as e:
-        print(f"\n\nError: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    main()

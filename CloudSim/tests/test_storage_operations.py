@@ -3,8 +3,13 @@ Unit tests for file storage operations in CloudSim
 Tests write, read, checksum verification, and disk space tracking
 """
 
-import unittest
+import sys
 import os
+
+# Add parent directory to path to import CloudSim modules
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import unittest
 import shutil
 import hashlib
 from storage_virtual_node import StorageVirtualNode, TransferStatus
@@ -15,13 +20,14 @@ class TestStorageOperations(unittest.TestCase):
     
     def setUp(self):
         """Set up test fixtures before each test"""
-        # Create a test node
+        # Create a test node (disable network checking for tests)
         self.test_node = StorageVirtualNode(
             node_id="test_node",
             cpu_capacity=4,
             memory_capacity=16,
             storage_capacity=10,  # 10 GB
-            bandwidth=1000
+            bandwidth=1000,
+            enable_network_check=False  # Disable network checking in tests
         )
         
     def tearDown(self):

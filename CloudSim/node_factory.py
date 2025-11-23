@@ -17,24 +17,29 @@ class NodeFactory:
     Supports creating nodes from configuration and managing their lifecycle
     """
     
-    def __init__(self, start_port: int = 5000, port_range_size: int = 1000):
+    def __init__(self, start_port: int = 5000, port_range_size: int = 1000, state_file: str = "nodes_state.json"):
         """
         Initialize the NodeFactory
         
         Args:
             start_port: Starting port number for auto-assignment (default: 5000)
             port_range_size: Number of ports to check for availability (default: 1000)
+            state_file: Path to file for persisting node state (default: "nodes_state.json")
         """
         self.nodes: Dict[str, StorageVirtualNode] = {}
         self.node_configs: Dict[str, Dict] = {}
         self.start_port = start_port
         self.port_range_size = port_range_size
         self.reserved_ports: set = set()  # Ports reserved but not yet used
+        self.state_file = state_file
         
         # Node discovery instances {node_id: NodeDiscovery}
         self.discovery_instances: Dict[str, NodeDiscovery] = {}
         self.discovery_enabled = False
         self.discovery_port = 9999  # Default discovery port
+        
+        # Load existing node configurations from disk
+        self._load_state()
         
         print(f"[NodeFactory] Initialized (port range: {start_port}-{start_port + port_range_size - 1})")
     
@@ -46,7 +51,8 @@ class NodeFactory:
         storage_capacity: int,
         bandwidth: int,
         host: str = "localhost",
-        port: Optional[int] = None
+        port: Optional[int] = None,
+        enable_network_check: bool = True  # Enable network checking on boot
     ) -> Optional[StorageVirtualNode]:
         """
         Create a single storage node
@@ -94,7 +100,8 @@ class NodeFactory:
                 storage_capacity=storage_capacity,
                 bandwidth=bandwidth,
                 host=host,
-                port=port
+                port=port,
+                enable_network_check=enable_network_check
             )
             
             # Store node and configuration
@@ -106,12 +113,16 @@ class NodeFactory:
                 "storage_capacity": storage_capacity,
                 "bandwidth": bandwidth,
                 "host": host,
-                "port": port
+                "port": port,
+                "enable_network_check": enable_network_check
             }
             
             # Release reserved port (node creation succeeded)
             if port_was_auto_assigned:
                 self._release_reserved_port(port)
+            
+            # Save state to disk
+            self._save_state()
             
             print(f"[NodeFactory] Created node {node_id} on {host}:{port}")
             return node
@@ -299,6 +310,9 @@ class NodeFactory:
         del self.nodes[node_id]
         del self.node_configs[node_id]
         
+        # Save state to disk
+        self._save_state()
+        
         print(f"[NodeFactory] Removed node {node_id}")
         return True
     
@@ -423,12 +437,17 @@ class NodeFactory:
         
         return True
     
-    def create_nodes_from_config(self, config_path: str) -> List[StorageVirtualNode]:
+    def create_nodes_from_config(
+        self, 
+        config_path: str,
+        enable_network_check: bool = True  # Enable network checking on boot
+    ) -> List[StorageVirtualNode]:
         """
         Create nodes from a JSON configuration file
         
         Args:
             config_path: Path to the JSON configuration file
+            enable_network_check: Enable network checking on boot (default: True)
             
         Returns:
             List of created StorageVirtualNode instances
@@ -478,7 +497,8 @@ class NodeFactory:
                 storage_capacity=storage_gb,
                 bandwidth=bandwidth_mbps,
                 host=host,
-                port=port
+                port=port,
+                enable_network_check=enable_network_check
             )
             
             if node:
@@ -507,7 +527,8 @@ class NodeFactory:
     def create_nodes_batch(
         self,
         node_configs: List[Dict],
-        start_port: Optional[int] = None
+        start_port: Optional[int] = None,
+        enable_network_check: bool = True  # Enable network checking on boot
     ) -> List[StorageVirtualNode]:
         """
         Create multiple nodes from a list of configuration dictionaries
@@ -554,7 +575,8 @@ class NodeFactory:
                 storage_capacity=storage_gb,
                 bandwidth=bandwidth_mbps,
                 host=host,
-                port=port
+                port=port,
+                enable_network_check=enable_network_check
             )
             
             if node:
@@ -862,6 +884,62 @@ class NodeFactory:
                 "stats": discovery.get_discovery_stats()
             }
         return result
+    
+    def _save_state(self):
+        """Save node configurations to disk"""
+        try:
+            state_data = {
+                "nodes": list(self.node_configs.values())
+            }
+            with open(self.state_file, 'w') as f:
+                json.dump(state_data, f, indent=2)
+        except Exception as e:
+            print(f"[NodeFactory] Error saving state: {e}")
+    
+    def _load_state(self):
+        """Load node configurations from disk and recreate node objects"""
+        if not os.path.exists(self.state_file):
+            return
+        
+        try:
+            with open(self.state_file, 'r') as f:
+                state_data = json.load(f)
+            
+            nodes_config = state_data.get("nodes", [])
+            if not nodes_config:
+                return
+            
+            print(f"[NodeFactory] Loading {len(nodes_config)} node(s) from state file...")
+            
+            for node_config in nodes_config:
+                node_id = node_config.get("node_id")
+                if not node_id:
+                    continue
+                
+                # Recreate node from saved configuration
+                node = StorageVirtualNode(
+                    node_id=node_id,
+                    cpu_capacity=node_config.get("cpu_capacity", 2),
+                    memory_capacity=node_config.get("memory_capacity", 4),
+                    storage_capacity=node_config.get("storage_capacity", 10),
+                    bandwidth=node_config.get("bandwidth", 100),
+                    host=node_config.get("host", "localhost"),
+                    port=node_config.get("port", 5000),
+                    enable_network_check=node_config.get("enable_network_check", True)
+                )
+                
+                # Store node and configuration
+                self.nodes[node_id] = node
+                self.node_configs[node_id] = node_config
+                
+                print(f"[NodeFactory] Loaded node {node_id} from state")
+            
+            print(f"[NodeFactory] Successfully loaded {len(self.nodes)} node(s)")
+            
+        except json.JSONDecodeError as e:
+            print(f"[NodeFactory] Invalid JSON in state file: {e}")
+        except Exception as e:
+            print(f"[NodeFactory] Error loading state: {e}")
     
     def __repr__(self):
         """String representation of NodeFactory"""

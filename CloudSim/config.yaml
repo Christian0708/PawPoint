@@ -86,8 +86,9 @@ latency:
   window_seconds: 300  # 5 minutes
   rtt_window_seconds: 300
 
-# Node Configuration File
+# Node Configuration
+# Nodes are created via CLI with custom specifications
+# No config file needed
 nodes:
-  config_file: "nodes_config.json"
-  auto_load: true
+  auto_load: false
 

@@ -1,0 +1,10 @@
+# CloudSim Distributed Storage System - Python Dependencies
+# Required dependencies for running the system
+
+# Configuration file parsing
+pyyaml>=6.0
+
+# Note: All other dependencies are from Python standard library:
+# - threading, socket, json, os, time, datetime, enum, dataclasses
+# - collections, logging, argparse, hashlib, typing, pathlib, csv
+

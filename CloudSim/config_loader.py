@@ -195,7 +195,7 @@ class ConfigLoader:
                 "rtt_window_seconds": 300
             },
             "nodes": {
-                "config_file": "nodes_config.json",
+                # Nodes are created via CLI, no config file needed
                 "auto_load": True
             }
         }
