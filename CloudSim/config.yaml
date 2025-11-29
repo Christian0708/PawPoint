@@ -19,7 +19,7 @@ node_factory:
 
 # Storage Configuration
 storage:
-  base_directory: "storage"
+  base_directory: "A:\\"
   chunk_size_mb: 1
   create_directories: true
 
@@ -91,4 +91,3 @@ latency:
 # No config file needed
 nodes:
   auto_load: false
-
