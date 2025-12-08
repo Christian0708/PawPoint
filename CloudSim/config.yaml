@@ -23,6 +23,12 @@ storage:
   chunk_size_mb: 1
   create_directories: true
 
+# Replication Configuration
+replication:
+  default_factor: 3  # Each chunk stored on 3 nodes for fault tolerance
+  min_factor: 2      # Minimum replication even if user requests less
+  max_factor: 6      # Maximum replication (capped at node count)
+
 # Metrics Collection Configuration
 metrics:
   enabled: true

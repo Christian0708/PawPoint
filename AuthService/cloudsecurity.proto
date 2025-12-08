@@ -1,0 +1,133 @@
+// generate the skeleton and stub classes
+// generate calculator_pb2.py and calculator_pb2_grpc.py.
+// python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. calculator.proto
+
+syntax = "proto3";
+
+package cloudauth;
+
+service UserService {
+  rpc Login (LoginRequest) returns (LoginResponse);
+  rpc VerifyOtp (VerifyOtpRequest) returns (AuthToken);
+  rpc CreateUser (CreateUserRequest) returns (CreateUserResponse);
+  rpc GetProfile (ProfileRequest) returns (Profile);
+  rpc PrecheckStore (PrecheckStoreRequest) returns (PrecheckStoreResponse);
+  rpc AddFileRecord (AddFileRecordRequest) returns (AddFileRecordResponse);
+  rpc RemoveFileRecord (RemoveFileRecordRequest) returns (RemoveFileRecordResponse);
+  rpc ListFiles (ListFilesRequest) returns (ListFilesResponse);
+  rpc ListAllUsers (ListAllUsersRequest) returns (ListAllUsersResponse);
+  rpc UpdateUserQuota (UpdateUserQuotaRequest) returns (UpdateUserQuotaResponse);
+}
+
+message LoginRequest {
+  string login = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string result = 1; // human-readable status
+  string pending_id = 2; // id to be used for OTP verification
+}
+
+message VerifyOtpRequest {
+  string login = 1;
+  string pending_id = 2;
+  string otp = 3;
+}
+
+message AuthToken {
+  string token = 1;
+}
+
+message CreateUserRequest {
+  string login = 1;
+  string email = 2;
+  string password = 3;
+  uint32 quota_gb = 4; // allocated quota in gigabytes
+}
+
+message CreateUserResponse {
+  bool created = 1;
+  string message = 2;
+}
+
+message ProfileRequest {
+  string login = 1;
+}
+
+message Profile {
+  string login = 1;
+  string email = 2;
+  uint64 used_bytes = 3;
+  uint64 quota_bytes = 4;
+}
+
+message PrecheckStoreRequest {
+  string login = 1;
+  uint64 file_size = 2;
+}
+
+message PrecheckStoreResponse {
+  bool allowed = 1;
+  uint64 remaining_bytes = 2;
+}
+
+message FileRecord {
+  string file_id = 1;
+  string name = 2;
+  uint64 size = 3;
+  repeated string nodes = 4;
+}
+
+message AddFileRecordRequest {
+  string login = 1;
+  FileRecord record = 2;
+}
+
+message AddFileRecordResponse {
+  bool ok = 1;
+}
+
+message RemoveFileRecordRequest {
+  string login = 1;
+  string file_id = 2;
+  uint64 size = 3;
+}
+
+message RemoveFileRecordResponse {
+  bool ok = 1;
+}
+
+message ListFilesRequest {
+  string login = 1;
+}
+
+message ListFilesResponse {
+  repeated FileRecord records = 1;
+}
+
+message ListAllUsersRequest {
+  // Empty - lists all users
+}
+
+message ListAllUsersResponse {
+  repeated UserInfo users = 1;
+}
+
+message UserInfo {
+  string login = 1;
+  string email = 2;
+  uint64 used_bytes = 3;
+  uint64 quota_bytes = 4;
+  int32 file_count = 5;
+}
+
+message UpdateUserQuotaRequest {
+  string login = 1;
+  uint32 quota_gb = 2;
+}
+
+message UpdateUserQuotaResponse {
+  bool ok = 1;
+  string message = 2;
+}

@@ -17,7 +17,7 @@ class NodeFactory:
     Supports creating nodes from configuration and managing their lifecycle
     """
     
-    def __init__(self, start_port: int = 5000, port_range_size: int = 1000, state_file: str = "nodes_state.json"):
+    def __init__(self, start_port: int = 5000, port_range_size: int = 1000, state_file: str = "nodes_state.json", storage_base_dir: Optional[str] = None):
         """
         Initialize the NodeFactory
         
@@ -32,6 +32,7 @@ class NodeFactory:
         self.port_range_size = port_range_size
         self.reserved_ports: set = set()  # Ports reserved but not yet used
         self.state_file = state_file
+        self.storage_base_dir = os.path.abspath(storage_base_dir) if storage_base_dir else os.path.abspath("storage")
         
         # Node discovery instances {node_id: NodeDiscovery}
         self.discovery_instances: Dict[str, NodeDiscovery] = {}
@@ -101,7 +102,8 @@ class NodeFactory:
                 bandwidth=bandwidth,
                 host=host,
                 port=port,
-                enable_network_check=enable_network_check
+                enable_network_check=enable_network_check,
+                storage_root=self.storage_base_dir
             )
             
             # Store node and configuration
@@ -114,6 +116,8 @@ class NodeFactory:
                 "bandwidth": bandwidth,
                 "host": host,
                 "port": port,
+                "ip_address": node.ip_address,
+                "mac_address": node.mac_address,
                 "enable_network_check": enable_network_check
             }
             
@@ -669,40 +673,59 @@ class NodeFactory:
         
         total_cpu = 0
         total_memory = 0
-        total_storage = 0
+        total_storage_bytes = 0  # Store in bytes for accuracy
         total_bandwidth = 0
-        used_storage = 0
+        used_storage_bytes = 0  # Store in bytes for accuracy
         
         for node_id, config in self.node_configs.items():
+            # Get capacity from config (in GB) and convert to bytes
+            storage_capacity_gb = config.get("storage_capacity", 0)
+            storage_capacity_bytes = storage_capacity_gb * (1024 ** 3)  # Convert GB to bytes
+            total_storage_bytes += storage_capacity_bytes
+            
             total_cpu += config.get("cpu_capacity", 0)
             total_memory += config.get("memory_capacity", 0)
-            total_storage += config.get("storage_capacity", 0)
             total_bandwidth += config.get("bandwidth", 0)
             
-            # Get actual used storage from node
-            node = self.nodes[node_id]
-            try:
-                storage_util = node.get_storage_utilization()
-                used_storage += storage_util.get("used_bytes", 0) / (1024 ** 3)  # Convert to GB
-            except Exception:
-                pass
+            # Get actual used storage from node (in bytes)
+            node = self.nodes.get(node_id)
+            if node:
+                try:
+                    storage_util = node.get_storage_utilization()
+                    used_storage_bytes += storage_util.get("used_bytes", 0)
+                except Exception:
+                    pass
+            else:
+                # Node not loaded in factory.nodes - try to get from disk
+                try:
+                    storage_root = os.path.abspath(self.storage_base_dir or "storage")
+                    node_storage_path = os.path.join(storage_root, node_id, "chunks")
+                    if os.path.exists(node_storage_path):
+                        node_used = sum(os.path.getsize(os.path.join(node_storage_path, f)) 
+                                       for f in os.listdir(node_storage_path) 
+                                       if os.path.isfile(os.path.join(node_storage_path, f)))
+                        used_storage_bytes += node_used
+                except Exception:
+                    pass
         
-        node_count = len(self.nodes)
-        available_storage = total_storage - used_storage
-        storage_utilization = (used_storage / total_storage * 100) if total_storage > 0 else 0.0
+        node_count = len(self.node_configs)  # Count all configured nodes, not just loaded ones
+        total_storage_gb = total_storage_bytes / (1024 ** 3)  # Convert bytes to GB
+        used_storage_gb = used_storage_bytes / (1024 ** 3)  # Convert bytes to GB
+        available_storage_gb = total_storage_gb - used_storage_gb
+        storage_utilization = (used_storage_bytes / total_storage_bytes * 100) if total_storage_bytes > 0 else 0.0
         
         return {
             "total_nodes": node_count,
             "total_cpu": total_cpu,
             "total_memory_gb": total_memory,
-            "total_storage_gb": total_storage,
+            "total_storage_gb": round(total_storage_gb, 2),
             "total_bandwidth_mbps": total_bandwidth,
-            "used_storage_gb": round(used_storage, 2),
-            "available_storage_gb": round(available_storage, 2),
+            "used_storage_gb": round(used_storage_gb, 2),
+            "available_storage_gb": round(available_storage_gb, 2),
             "storage_utilization_percent": round(storage_utilization, 2),
             "average_cpu": round(total_cpu / node_count, 2) if node_count > 0 else 0,
             "average_memory_gb": round(total_memory / node_count, 2) if node_count > 0 else 0,
-            "average_storage_gb": round(total_storage / node_count, 2) if node_count > 0 else 0,
+            "average_storage_gb": round(total_storage_gb / node_count, 2) if node_count > 0 else 0,
             "average_bandwidth_mbps": round(total_bandwidth / node_count, 2) if node_count > 0 else 0
         }
     
@@ -896,8 +919,12 @@ class NodeFactory:
         except Exception as e:
             print(f"[NodeFactory] Error saving state: {e}")
     
-    def _load_state(self):
-        """Load node configurations from disk and recreate node objects"""
+    def _load_state(self, verbose: bool = True):
+        """Load node configurations from disk and recreate node objects
+        
+        Args:
+            verbose: If True, print loading messages. Set to False for silent reloads.
+        """
         if not os.path.exists(self.state_file):
             return
         
@@ -909,11 +936,17 @@ class NodeFactory:
             if not nodes_config:
                 return
             
-            print(f"[NodeFactory] Loading {len(nodes_config)} node(s) from state file...")
+            new_nodes_loaded = 0
             
             for node_config in nodes_config:
                 node_id = node_config.get("node_id")
                 if not node_id:
+                    continue
+                
+                # Skip if node already exists (don't overwrite running nodes)
+                if node_id in self.nodes:
+                    # Update config but keep existing node instance
+                    self.node_configs[node_id] = node_config
                     continue
                 
                 # Recreate node from saved configuration
@@ -925,16 +958,32 @@ class NodeFactory:
                     bandwidth=node_config.get("bandwidth", 100),
                     host=node_config.get("host", "localhost"),
                     port=node_config.get("port", 5000),
-                    enable_network_check=node_config.get("enable_network_check", True)
+                    enable_network_check=node_config.get("enable_network_check", True),
+                    storage_root=self.storage_base_dir
                 )
+                
+                # Update IP and MAC addresses if not in config (for backward compatibility)
+                if "ip_address" not in node_config:
+                    node_config["ip_address"] = node.ip_address
+                else:
+                    node.ip_address = node_config.get("ip_address", node.ip_address)
+                
+                if "mac_address" not in node_config:
+                    node_config["mac_address"] = node.mac_address
+                else:
+                    node.mac_address = node_config.get("mac_address", node.mac_address)
                 
                 # Store node and configuration
                 self.nodes[node_id] = node
                 self.node_configs[node_id] = node_config
+                new_nodes_loaded += 1
                 
-                print(f"[NodeFactory] Loaded node {node_id} from state")
+                if verbose:
+                    print(f"[NodeFactory] Loaded node {node_id} from state")
             
-            print(f"[NodeFactory] Successfully loaded {len(self.nodes)} node(s)")
+            # Only print summary if new nodes were loaded
+            if verbose and new_nodes_loaded > 0:
+                print(f"[NodeFactory] Successfully loaded {new_nodes_loaded} new node(s)")
             
         except json.JSONDecodeError as e:
             print(f"[NodeFactory] Invalid JSON in state file: {e}")
@@ -945,4 +994,49 @@ class NodeFactory:
         """String representation of NodeFactory"""
         discovery_status = "enabled" if self.discovery_enabled else "disabled"
         return f"NodeFactory(nodes={len(self.nodes)}, discovery={discovery_status})"
+
+    def load_state_incremental(self) -> int:
+        """Load any new nodes from state that are not currently in memory."""
+        if not os.path.exists(self.state_file):
+            return 0
+        try:
+            with open(self.state_file, 'r') as f:
+                state_data = json.load(f)
+            nodes_config = state_data.get("nodes", [])
+            added = 0
+            for node_config in nodes_config:
+                node_id = node_config.get("node_id")
+                if not node_id or node_id in self.nodes:
+                    continue
+                node = StorageVirtualNode(
+                    node_id=node_id,
+                    cpu_capacity=node_config.get("cpu_capacity", 2),
+                    memory_capacity=node_config.get("memory_capacity", 4),
+                    storage_capacity=node_config.get("storage_capacity", 10),
+                    bandwidth=node_config.get("bandwidth", 100),
+                    host=node_config.get("host", "localhost"),
+                    port=node_config.get("port", 5000),
+                    enable_network_check=node_config.get("enable_network_check", True),
+                    storage_root=self.storage_base_dir
+                )
+                
+                # Update IP and MAC addresses if not in config
+                if "ip_address" not in node_config:
+                    node_config["ip_address"] = node.ip_address
+                else:
+                    node.ip_address = node_config.get("ip_address", node.ip_address)
+                
+                if "mac_address" not in node_config:
+                    node_config["mac_address"] = node.mac_address
+                else:
+                    node.mac_address = node_config.get("mac_address", node.mac_address)
+                
+                self.nodes[node_id] = node
+                self.node_configs[node_id] = node_config
+                added += 1
+                print(f"[NodeFactory] Incrementally loaded node {node_id} from state")
+            return added
+        except Exception as e:
+            print(f"[NodeFactory] Error incremental loading state: {e}")
+            return 0
 

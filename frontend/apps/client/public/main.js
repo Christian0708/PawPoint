@@ -636,7 +636,7 @@ function renderUpload() {
       formData.append('file', selectedFile)
       formData.append('user', currentUser)
       
-      const response = await fetch('/files/upload', {
+      const response = await fetch('/files', {
         method: 'POST',
         body: formData
       })
@@ -726,7 +726,7 @@ function renderFiles() {
         </thead>
         <tbody>
           ${files.map(f => `
-            <tr style="border-bottom: 1px solid #eee;" data-id="${f.file_id}">
+            <tr style="border-bottom: 1px solid #eee;" data-id="${f.file_id}" data-name="${f.name || 'download'}">
               <td style="padding: 12px;">
                 <strong>${f.name || f.file_id}</strong>
               </td>
@@ -746,8 +746,10 @@ function renderFiles() {
     // Add event listeners
     filesList.querySelectorAll('button.download').forEach(btn => {
       btn.addEventListener('click', (e) => {
-        const fileId = e.target.closest('tr').getAttribute('data-id')
-        window.open(`/files/${fileId}/download`, '_blank')
+        const row = e.target.closest('tr')
+        const fileId = row.getAttribute('data-id')
+        const fileName = row.getAttribute('data-name')
+        window.open(`/files/${fileId}/download?filename=${encodeURIComponent(fileName)}`, '_blank')
         showNotification('Download started', 'success')
       })
     })

@@ -1,0 +1,119 @@
+syntax = "proto3";
+package cloud;
+
+message StatusRequest {}
+
+message NodeInfo {
+  string node_id = 1;
+  string host = 2;
+  int32 port = 3;
+  bool running = 4;
+  float storage_utilization_percent = 5;
+  int32 files_stored = 6;
+  string ip_address = 7;
+  string mac_address = 8;
+}
+
+message StatusResponse {
+  int32 total_nodes = 1;
+  int32 running_nodes = 2;
+  int32 stopped_nodes = 3;
+  repeated NodeInfo nodes = 4;
+}
+
+message NodeRequest {
+  string node_id = 1;
+  bool force = 2;
+}
+
+message OpResponse {
+  bool ok = 1;
+  string message = 2;
+}
+
+message StoreFileRequest {
+  string file_path = 1;
+  string user = 2;
+  int32 replication = 3;
+}
+
+message StoreFileResponse {
+  bool ok = 1;
+  string file_id = 2;
+  string message = 3;
+}
+
+message ReplicateFileRequest {
+  string source_node_id = 1;
+  string dest_node_id = 2;
+  string file_id = 3;
+  string user = 4;
+}
+
+message UserRequest {
+  string user = 1;
+}
+
+message FileRecord {
+  string file_id = 1;
+  string name = 2;
+  int64 size = 3;
+  repeated string nodes = 4;
+}
+
+message ListFilesResponse {
+  repeated FileRecord records = 1;
+}
+
+message ProfileResponse {
+  int64 used_bytes = 1;
+  int64 quota_bytes = 2;
+}
+
+message DownloadFileRequest {
+  string file_id = 1;
+  string node_id = 2;
+}
+
+message FileChunk {
+  bytes data = 1;
+  int32 index = 2;
+}
+
+message DeleteFileRequest {
+  string file_id = 1;
+  string user = 2;
+}
+
+message NetworkRequest {}
+
+message NetworkNodeInfo {
+  string host = 1;
+  int32 port = 2;
+  string last_seen = 3;
+  string registered_at = 4;
+}
+
+message NetworkStatusResponse {
+  bool running = 1;
+  string network_name = 2;
+  int32 discovery_port = 3;
+  int32 registered_nodes = 4;
+  map<string, NetworkNodeInfo> nodes = 5;
+}
+
+service CloudSim {
+  rpc GetStatus (StatusRequest) returns (StatusResponse);
+  rpc StartNode (NodeRequest) returns (OpResponse);
+  rpc StopNode (NodeRequest) returns (OpResponse);
+  rpc StoreFile (StoreFileRequest) returns (StoreFileResponse);
+  rpc ReplicateFile (ReplicateFileRequest) returns (OpResponse);
+  rpc ListFiles (UserRequest) returns (ListFilesResponse);
+  rpc GetProfile (UserRequest) returns (ProfileResponse);
+  rpc DownloadFile (DownloadFileRequest) returns (stream FileChunk);
+  rpc DeleteFile (DeleteFileRequest) returns (OpResponse);
+  rpc StartNetwork (NetworkRequest) returns (OpResponse);
+  rpc StopNetwork (NetworkRequest) returns (OpResponse);
+  rpc GetNetworkStatus (StatusRequest) returns (NetworkStatusResponse);
+  rpc DeleteNode (NodeRequest) returns (OpResponse);
+}

@@ -6,7 +6,11 @@ Provides commands for managing nodes, monitoring metrics, and system operations
 import argparse
 import sys
 import time
+import os
+import socket
 from typing import Optional
+import hashlib
+import json
 from config_loader import ConfigLoader
 from node_factory import NodeFactory
 from metrics_collector import MetricsCollector
@@ -36,6 +40,8 @@ class CloudSimCLI:
             config_path: Path to configuration file
         """
         # Load configuration
+        if not os.path.exists(config_path) and os.path.exists(os.path.join(os.path.dirname(__file__), 'config.yaml')):
+            config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
         self.config = ConfigLoader(config_path)
         self.config.load()
         
@@ -46,8 +52,10 @@ class CloudSimCLI:
         # Initialize components
         start_port = self.config.get("node_factory.start_port", 5000)
         port_range = self.config.get("node_factory.port_range_size", 1000)
+        storage_root = os.path.abspath(self.config.get("storage.base_directory", "storage"))
+        state_file = self.config.get("nodes_state_file", "nodes_state.json")
         
-        self.factory = NodeFactory(start_port=start_port, port_range_size=port_range)
+        self.factory = NodeFactory(start_port=start_port, port_range_size=port_range, state_file=state_file, storage_base_dir=storage_root)
         self.metrics = MetricsCollector(self.factory)
         self.capacity = CapacityEvaluator(self.factory)
         
@@ -55,10 +63,12 @@ class CloudSimCLI:
         discovery_port = self.config.get("network.discovery.port", 9999)
         broadcast_interval = self.config.get("network.discovery.broadcast_interval_seconds", 30.0)
         network_name = self.config.get("network.name", "CloudSim_Storage_Network")
+        node_timeout = self.config.get("network.discovery.node_timeout_seconds", 90.0)
         self.network_service = NetworkService(
             discovery_port=discovery_port,
             broadcast_interval=broadcast_interval,
-            network_name=network_name
+            network_name=network_name,
+            node_timeout=node_timeout
         )
         
         self.logger.info("CLI components initialized")
@@ -100,8 +110,10 @@ class CloudSimCLI:
                 print(f"[ERROR] Error starting nodes: {e}")
                 sys.exit(1)
         
-        # If interactive mode, keep process alive
+        # Keep process alive unless explicitly disabled
         if hasattr(args, 'interactive') and args.interactive:
+            self._run_interactive_mode()
+        elif hasattr(args, 'no_interactive') and not args.no_interactive:
             self._run_interactive_mode()
     
     def cmd_stop(self, args):
@@ -116,22 +128,55 @@ class CloudSimCLI:
                 node = self.factory.get_node(node_id)
                 if node:
                     try:
-                        node.stop(graceful=args.graceful, timeout=args.timeout)
-                        node.join(timeout=3.0)
-                        print(f"[OK] Stopped node: {node_id}")
-                        stopped += 1
+                        if node.is_alive() or node.running:
+                            node.stop(graceful=args.graceful, timeout=args.timeout)
+                            node.join(timeout=3.0)
+                            print(f"[OK] Stopped node: {node_id}")
+                            stopped += 1
+                        else:
+                            cfg = self.factory.node_configs.get(node_id, {})
+                            host = cfg.get('host', 'localhost')
+                            port = int(cfg.get('port', 0) or 0)
+                            if port:
+                                ok = self._send_remote_shutdown(host, port, node_id, force=getattr(args, 'force', False))
+                                if ok:
+                                    print(f"[OK] Sent remote shutdown to {node_id} at {host}:{port}")
+                                    stopped += 1
+                                else:
+                                    print(f"[ERROR] Remote shutdown failed for {node_id} at {host}:{port}")
+                            else:
+                                print(f"[ERROR] Node {node_id} has no valid port configured")
                     except Exception as e:
                         print(f"[ERROR] Error stopping node {node_id}: {e}")
                 else:
-                    print(f"[ERROR] Node {node_id} not found")
+                    # Attempt remote stop via TCP if node is running in another process
+                    cfg = self.factory.node_configs.get(node_id, {})
+                    host = cfg.get('host', 'localhost')
+                    port = int(cfg.get('port', 0) or 0)
+                    if port:
+                        ok = self._send_remote_shutdown(host, port, node_id, force=getattr(args, 'force', False))
+                        if ok:
+                            print(f"[OK] Sent remote shutdown to {node_id} at {host}:{port}")
+                            stopped += 1
+                        else:
+                            print(f"[ERROR] Node {node_id} not found locally and remote shutdown failed")
+                    else:
+                        print(f"[ERROR] Node {node_id} not found")
             
             if stopped > 0:
                 print(f"\nStopped {stopped} node(s)")
         else:
             # Stop all nodes
             try:
+                # First stop local nodes
                 self.factory.stop_all_nodes(graceful=args.graceful, timeout=args.timeout)
-                print("[OK] All nodes stopped")
+                # Then attempt remote shutdown for any nodes running in other processes
+                for nid, cfg in (self.factory.node_configs or {}).items():
+                    host = cfg.get('host', 'localhost')
+                    port = int(cfg.get('port', 0) or 0)
+                    if port and not self.factory.get_node(nid).is_alive():
+                        self._send_remote_shutdown(host, port, nid, force=getattr(args, 'force', False))
+                print("[OK] All nodes stopped (local + remote)")
             except Exception as e:
                 print(f"[ERROR] Error stopping nodes: {e}")
                 sys.exit(1)
@@ -180,8 +225,21 @@ class CloudSimCLI:
                 print(f"Error: Node '{args.node}' not found")
                 sys.exit(1)
             
-            is_running = node.is_alive() or node.running
+            # Determine running state using local thread or TCP port probe
             config = self.factory.node_configs.get(args.node, {})
+            if node.is_alive() or node.running:
+                is_running = True
+            else:
+                host = config.get('host', 'localhost')
+                port = int(config.get('port', 0) or 0)
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(0.5)
+                    s.connect((host, port))
+                    s.close()
+                    is_running = True
+                except Exception:
+                    is_running = False
             
             if is_running:
                 storage_util = node.get_storage_utilization()
@@ -245,11 +303,29 @@ class CloudSimCLI:
         # Node Factory Status
         stats = self.factory.get_factory_stats()
         nodes = self.factory.get_all_nodes()
+        registered_nodes = set((network_status.get('nodes') or {}).keys())
         
         print(f"\n[NODES]")
+        # Derive counts considering remote registrations and port probes
+        local_running = stats['running_nodes']
+        def _is_running_cross_process(n):
+            if n.is_alive() or n.running:
+                return True
+            cfg = self.factory.node_configs.get(n.node_id, {})
+            host = cfg.get('host', 'localhost')
+            port = int(cfg.get('port', 0) or 0)
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.5)
+                s.connect((host, port))
+                s.close()
+                return True
+            except Exception:
+                return False
+        inferred_running = len([n for n in nodes if _is_running_cross_process(n)])
         print(f"  Total:        {stats['total_nodes']}")
-        print(f"  Running:      {stats['running_nodes']}")
-        print(f"  Stopped:      {stats['stopped_nodes']}")
+        print(f"  Running:      {max(local_running, inferred_running)}")
+        print(f"  Stopped:      {max(0, stats['total_nodes'] - max(local_running, inferred_running))}")
         
         # Resource Summary
         if stats['total_nodes'] > 0:
@@ -269,7 +345,20 @@ class CloudSimCLI:
             
             for node in nodes:
                 node_id = node.node_id
-                is_running = node.is_alive() or node.running
+                if node.is_alive() or node.running:
+                    is_running = True
+                else:
+                    cfg = self.factory.node_configs.get(node_id, {})
+                    host = cfg.get('host', 'localhost')
+                    port = int(cfg.get('port', 0) or 0)
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(0.5)
+                        s.connect((host, port))
+                        s.close()
+                        is_running = True
+                    except Exception:
+                        is_running = False
                 status = "[RUNNING]" if is_running else "[STOPPED]"
                 config = self.factory.node_configs.get(node_id, {})
                 host_port = f"{config.get('host', 'unknown')}:{config.get('port', 'unknown')}"
@@ -295,6 +384,20 @@ class CloudSimCLI:
         if not nodes:
             print("No nodes found. Use 'create' command to create nodes.")
             return
+        def _is_running_cross_process(n):
+            if n.is_alive() or n.running:
+                return True
+            cfg = self.factory.node_configs.get(n.node_id, {})
+            host = cfg.get('host', 'localhost')
+            port = int(cfg.get('port', 0) or 0)
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.5)
+                s.connect((host, port))
+                s.close()
+                return True
+            except Exception:
+                return False
         
         if args.verbose:
             # Detailed list
@@ -304,7 +407,7 @@ class CloudSimCLI:
             
             for node in nodes:
                 node_id = node.node_id
-                is_running = node.is_alive() or node.running
+                is_running = _is_running_cross_process(node)
                 status = "[RUNNING]" if is_running else "[STOPPED]"
                 config = self.factory.node_configs.get(node_id, {})
                 
@@ -323,7 +426,7 @@ class CloudSimCLI:
             
             for node in nodes:
                 node_id = node.node_id
-                is_running = node.is_alive() or node.running
+                is_running = _is_running_cross_process(node)
                 status = "[RUNNING]" if is_running else "[STOPPED]"
                 host = node.host
                 port = node.port
@@ -345,7 +448,19 @@ class CloudSimCLI:
                 sys.exit(1)
             
             config = self.factory.node_configs.get(args.node, {})
-            is_running = node.is_alive() or node.running
+            if node.is_alive() or node.running:
+                is_running = True
+            else:
+                host = config.get('host', 'localhost')
+                port = int(config.get('port', 0) or 0)
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(0.5)
+                    s.connect((host, port))
+                    s.close()
+                    is_running = True
+                except Exception:
+                    is_running = False
             
             if is_running:
                 storage_util = node.get_storage_utilization()
@@ -514,6 +629,7 @@ class CloudSimCLI:
         """Metrics command"""
         if not self.factory or not self.metrics:
             self.setup()
+        self.metrics.collect_all_nodes_metrics()
         
         if args.export:
             # Export metrics
@@ -582,8 +698,10 @@ class CloudSimCLI:
                     print("Failed to start network service")
                     return
             
-            # Keep process alive for network (network needs to stay running)
-            # Otherwise the daemon threads will die when CLI process exits
+            # Keep process alive by default unless explicitly disabled
+            if hasattr(args, 'no_interactive') and args.no_interactive:
+                return
+            # If explicit interactive requested or default behavior, run interactive mode
             self._run_network_interactive_mode()
         
         elif args.action == "stop":
@@ -744,6 +862,40 @@ class CloudSimCLI:
                         break
         except KeyboardInterrupt:
             signal_handler(None, None)
+
+    def _send_remote_shutdown(self, host: str, port: int, target_id: str, force: bool = False) -> bool:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            s.connect((host, port))
+            msg = {
+                'type': 'SHUTDOWN',
+                'reason': 'cli_stop_command',
+                'timestamp': time.time(),
+                'sender_node_id': 'cli'
+            }
+            data = json.dumps(msg).encode('utf-8')
+            s.sendall(len(data).to_bytes(4, byteorder='big'))
+            s.sendall(data)
+            try:
+                s.close()
+            except Exception:
+                pass
+            # Verify closure with backoff
+            deadline = time.time() + (15.0 if force else 5.0)
+            while time.time() < deadline:
+                try:
+                    chk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    chk.settimeout(0.5)
+                    chk.connect((host, port))
+                    chk.close()
+                    time.sleep(0.5)
+                    continue
+                except Exception:
+                    return True
+            return False
+        except Exception:
+            return False
     
     def create_parser(self) -> argparse.ArgumentParser:
         """Create argument parser with all commands"""
@@ -759,6 +911,8 @@ class CloudSimCLI:
         start_parser.add_argument('nodes', nargs='*', help='Node IDs to start (all if not specified)')
         start_parser.add_argument('--interactive', '-i', action='store_true', 
                                 help='Keep process running in interactive mode')
+        start_parser.add_argument('--no-interactive', action='store_true', 
+                                help='Do not keep process alive after starting')
         start_parser.set_defaults(func=self.cmd_start)
         
         # Stop command
@@ -766,6 +920,7 @@ class CloudSimCLI:
         stop_parser.add_argument('nodes', nargs='*', help='Node IDs to stop (all if not specified)')
         stop_parser.add_argument('--graceful', action='store_true', default=True, help='Graceful shutdown')
         stop_parser.add_argument('--timeout', type=float, default=5.0, help='Shutdown timeout in seconds')
+        stop_parser.add_argument('--force', action='store_true', help='Wait until TCP listeners close')
         stop_parser.set_defaults(func=self.cmd_stop)
         
         # Restart command
@@ -835,7 +990,48 @@ Examples:
         network_parser = subparsers.add_parser('network', help='Manage network service (start/stop/status)')
         network_parser.add_argument('action', choices=['start', 'stop', 'status'], 
                                    help='Network action: start, stop, or status')
+        network_parser.add_argument('--interactive', '-i', action='store_true', 
+                                   help='Keep process running in interactive mode')
+        network_parser.add_argument('--no-interactive', action='store_true', 
+                                   help='Do not keep process alive after starting')
         network_parser.set_defaults(func=self.cmd_network)
+
+        upload_parser = subparsers.add_parser('upload', help='Upload a local file to a node')
+        upload_parser.add_argument('--node', required=True, help='Target node ID')
+        upload_parser.add_argument('--file', required=True, help='Path to local file')
+        upload_parser.set_defaults(func=self.cmd_upload)
+
+        download_parser = subparsers.add_parser('download', help='Download a stored file from a node')
+        download_parser.add_argument('--node', required=True, help='Source node ID')
+        download_parser.add_argument('--file-id', required=True, help='Stored file ID')
+        download_parser.add_argument('--out', required=True, help='Destination file path')
+        download_parser.set_defaults(func=self.cmd_download)
+
+        store_parser = subparsers.add_parser('store-file', help='Store a local file across nodes with replication')
+        store_parser.add_argument('--file', required=True, help='Path to local file')
+        store_parser.add_argument('--replication', type=int, default=None, help='Replication factor (defaults from config)')
+        store_parser.add_argument('--user', type=str, default=None, help='AuthService user login for quota and indexing')
+        store_parser.set_defaults(func=self.cmd_store_file)
+
+        delete_parser = subparsers.add_parser('delete-file', help='Delete a stored file by id across nodes')
+        delete_parser.add_argument('--file-id', required=True, help='Stored file ID to delete')
+        delete_parser.add_argument('--user', type=str, default=None, help='AuthService user login for usage update')
+        delete_parser.set_defaults(func=self.cmd_delete_file)
+
+        files_parser = subparsers.add_parser('list-files', help='List files for a user via AuthService')
+        files_parser.add_argument('--user', required=True, help='AuthService user login')
+        files_parser.set_defaults(func=self.cmd_list_files)
+
+        profile_parser = subparsers.add_parser('profile', help='Show user profile and quota via AuthService')
+        profile_parser.add_argument('--user', required=True, help='AuthService user login')
+        profile_parser.set_defaults(func=self.cmd_profile)
+
+        replicate_parser = subparsers.add_parser('replicate-file', help='Replicate a file from source node to destination node over TCP')
+        replicate_parser.add_argument('--source', required=True, help='Source node ID')
+        replicate_parser.add_argument('--dest', required=True, help='Destination node ID')
+        replicate_parser.add_argument('--file-id', required=True, help='File ID to replicate')
+        replicate_parser.add_argument('--user', type=str, default=None, help='AuthService user login to update index')
+        replicate_parser.set_defaults(func=self.cmd_replicate_file)
         
         return parser
     
@@ -865,6 +1061,239 @@ Examples:
                 sys.exit(1)
         else:
             parser.print_help()
+
+    def cmd_upload(self, args):
+        if not self.factory:
+            self.setup()
+        node = self.factory.get_node(args.node)
+        if not node:
+            print(f"Node {args.node} not found")
+            sys.exit(1)
+        if not os.path.exists(args.file):
+            print(f"File {args.file} not found")
+            sys.exit(1)
+        transfer = node.store_local_file(args.file)
+        if not transfer:
+            print("Upload failed")
+            sys.exit(1)
+        print(f"Uploaded {transfer.file_name} to {args.node}")
+        print(f"File ID: {transfer.file_id}")
+        print(f"Chunks: {len(transfer.chunks)}")
+
+    def cmd_download(self, args):
+        if not self.factory:
+            self.setup()
+        node = self.factory.get_node(args.node)
+        if not node:
+            print(f"Node {args.node} not found")
+            sys.exit(1)
+        ok = node.export_file_to_path(args.file_id, args.out)
+        if not ok:
+            print("Download failed")
+            sys.exit(1)
+        print(f"Downloaded {args.file_id} to {args.out}")
+
+    def cmd_store_file(self, args):
+        if not self.factory:
+            self.setup()
+        file_path = args.file
+        if not os.path.exists(file_path):
+            print(f"File {file_path} not found")
+            sys.exit(1)
+        file_size = os.path.getsize(file_path)
+        if args.user:
+            try:
+                import grpc
+                sys.path.append(os.path.abspath('AuthService'))
+                import cloudsecurity_pb2 as pb
+                import cloudsecurity_pb2_grpc as grpcpb
+                channel = grpc.insecure_channel('localhost:51234')
+                stub = grpcpb.UserServiceStub(channel)
+                pre = stub.PrecheckStore(pb.PrecheckStoreRequest(login=args.user, file_size=file_size))
+                if not pre.allowed:
+                    print(f"Quota exceeded for {args.user}. Remaining: {pre.remaining_bytes} bytes")
+                    sys.exit(1)
+            except Exception as e:
+                print(f"AuthService precheck failed: {e}")
+        nodes = self.factory.get_all_nodes()
+        if not nodes:
+            print("No nodes available to store file")
+            sys.exit(1)
+        rep_factor = args.replication or self.config.get('storage.replication_factor', 1)
+        rep_factor = max(1, min(rep_factor, len(nodes)))
+        file_name = os.path.basename(file_path)
+        file_id = hashlib.md5(f"{file_name}-{time.time()}".encode()).hexdigest()
+        primary = nodes[0]
+        chunk_size = max(256 * 1024, min(5 * 1024 * 1024, int(file_size / max(1, primary.max_concurrent_transfers))))
+        num_chunks = (file_size + chunk_size - 1) // chunk_size
+        assigned = []
+        for i in range(num_chunks):
+            targets = []
+            for r in range(rep_factor):
+                targets.append(nodes[(i + r) % len(nodes)])
+            assigned.append(targets)
+        with open(file_path, 'rb') as f:
+            for idx in range(num_chunks):
+                data = f.read(chunk_size)
+                for tgt in assigned[idx]:
+                    success, checksum = tgt.write_chunk_to_disk(file_id, idx, data)
+                    if not success:
+                        print(f"Failed to write chunk {idx} on {tgt.node_id}")
+                        sys.exit(1)
+        if args.user:
+            try:
+                import grpc
+                import cloudsecurity_pb2 as pb
+                import cloudsecurity_pb2_grpc as grpcpb
+                channel = grpc.insecure_channel('localhost:51234')
+                stub = grpcpb.UserServiceStub(channel)
+                node_ids = [n.node_id for group in assigned for n in group]
+                rec = pb.FileRecord(file_id=file_id, name=file_name, size=file_size, nodes=node_ids)
+                add = stub.AddFileRecord(pb.AddFileRecordRequest(login=args.user, record=rec))
+                if add.ok:
+                    print(f"Indexed file for user {args.user}")
+                else:
+                    print("Failed to add file record to AuthService")
+            except Exception as e:
+                print(f"AuthService indexing failed: {e}")
+        print(f"Stored {file_name} ({file_size} bytes) across {len(nodes)} node(s) with replication={rep_factor}")
+        print(f"File ID: {file_id}")
+
+    def cmd_delete_file(self, args):
+        if not self.factory:
+            self.setup()
+        file_id = args.file_id
+        nodes = self.factory.get_all_nodes()
+        if not nodes:
+            print("No nodes available")
+            sys.exit(1)
+        total_removed = 0
+        for node in nodes:
+            total_removed += node.delete_file_by_id(file_id)
+        print(f"Deleted file {file_id} across {len(nodes)} node(s), removed {total_removed} bytes of replicated chunks")
+        if args.user:
+            try:
+                import grpc
+                sys.path.append(os.path.abspath('AuthService'))
+                import cloudsecurity_pb2 as pb
+                import cloudsecurity_pb2_grpc as grpcpb
+                channel = grpc.insecure_channel('localhost:51234')
+                stub = grpcpb.UserServiceStub(channel)
+                lf = stub.ListFiles(pb.ListFilesRequest(login=args.user))
+                file_size = 0
+                for r in lf.records:
+                    if r.file_id == file_id:
+                        file_size = r.size
+                        break
+                if file_size > 0:
+                    rem = stub.RemoveFileRecord(pb.RemoveFileRecordRequest(login=args.user, file_id=file_id, size=file_size))
+                    if rem.ok:
+                        print(f"Updated AuthService: decremented {file_size} bytes for {args.user}")
+                    else:
+                        print("AuthService removal failed")
+                else:
+                    print("File not found in AuthService index; no quota update")
+            except Exception as e:
+                print(f"AuthService update failed: {e}")
+
+    def cmd_list_files(self, args):
+        try:
+            import grpc
+            sys.path.append(os.path.abspath('AuthService'))
+            import cloudsecurity_pb2 as pb
+            import cloudsecurity_pb2_grpc as grpcpb
+            channel = grpc.insecure_channel('localhost:51234')
+            stub = grpcpb.UserServiceStub(channel)
+            lf = stub.ListFiles(pb.ListFilesRequest(login=args.user))
+            print(f"Files for {args.user}: {len(lf.records)}")
+            for r in lf.records:
+                print(f"- {r.file_id} {r.name} {r.size} bytes nodes={list(r.nodes)}")
+        except Exception as e:
+            print(f"ListFiles failed: {e}")
+
+    def cmd_profile(self, args):
+        try:
+            import grpc
+            sys.path.append(os.path.abspath('AuthService'))
+            import cloudsecurity_pb2 as pb
+            import cloudsecurity_pb2_grpc as grpcpb
+            channel = grpc.insecure_channel('localhost:51234')
+            stub = grpcpb.UserServiceStub(channel)
+            prof = stub.GetProfile(pb.ProfileRequest(login=args.user))
+            print(f"Profile for {args.user}: used={prof.used_bytes} bytes quota={prof.quota_bytes} bytes")
+        except Exception as e:
+            print(f"Profile failed: {e}")
+
+    def cmd_replicate_file(self, args):
+        if not self.factory:
+            self.setup()
+        src = self.factory.get_node(args.source)
+        dst = self.factory.get_node(args.dest)
+        if not src or not dst:
+            print("Source or destination node not found")
+            sys.exit(1)
+        try:
+            src.network_manager.connect_to_node(dst.node_id, dst.host, dst.port)
+        except Exception:
+            pass
+        chunks_dir = src.chunks_path
+        prefix = f"{args.file_id}_chunk_"
+        files = [f for f in os.listdir(chunks_dir) if f.startswith(prefix) and f.endswith('.bin')]
+        if not files:
+            print("No chunks found on source node")
+            sys.exit(1)
+        def _chunk_index(name: str) -> int:
+            try:
+                return int(name.split('_chunk_')[-1].split('.bin')[0])
+            except Exception:
+                return 0
+        files.sort(key=_chunk_index)
+        total_size = 0
+        for fname in files:
+            idx = _chunk_index(fname)
+            try:
+                total_size += os.path.getsize(os.path.join(chunks_dir, fname))
+            except Exception:
+                pass
+            ok = src.send_chunk_to_node(dst.node_id, args.file_id, idx)
+            if not ok:
+                print(f"Failed to transfer chunk {idx}")
+                sys.exit(1)
+        print(f"Replicated file {args.file_id} from {args.source} to {args.dest} over TCP")
+        if getattr(args, 'user', None):
+            try:
+                import grpc
+                import cloudsecurity_pb2 as pb
+                import cloudsecurity_pb2_grpc as grpcpb
+                channel = grpc.insecure_channel('localhost:51234')
+                stub = grpcpb.UserServiceStub(channel)
+                listed = stub.ListFiles(pb.ListFilesRequest(login=args.user))
+                existing = None
+                for rec in listed.records:
+                    if rec.file_id == args.file_id:
+                        existing = rec
+                        break
+                if existing:
+                    nodes = list(existing.nodes)
+                    if dst.node_id not in nodes:
+                        nodes.append(dst.node_id)
+                    stub.RemoveFileRecord(pb.RemoveFileRecordRequest(login=args.user, file_id=args.file_id, size=existing.size))
+                    newrec = pb.FileRecord(file_id=args.file_id, name=existing.name, size=existing.size, nodes=nodes)
+                    add = stub.AddFileRecord(pb.AddFileRecordRequest(login=args.user, record=newrec))
+                    if add.ok:
+                        print(f"Updated file index for user {args.user}")
+                    else:
+                        print("Failed to update file record in AuthService")
+                else:
+                    node_ids = [dst.node_id]
+                    newrec = pb.FileRecord(file_id=args.file_id, name=args.file_id, size=total_size, nodes=node_ids)
+                    add = stub.AddFileRecord(pb.AddFileRecordRequest(login=args.user, record=newrec))
+                    if add.ok:
+                        print(f"Indexed replicated file for user {args.user}")
+                    else:
+                        print("Failed to add file record to AuthService")
+            except Exception as e:
+                print(f"AuthService indexing failed: {e}")
 
 
 def main():

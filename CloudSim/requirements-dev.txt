@@ -1,0 +1,18 @@
+# CloudSim Distributed Storage System - Development Dependencies
+# Optional dependencies for testing and development
+
+# Testing framework
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Code quality
+pylint>=2.17.0
+black>=23.0.0
+flake8>=6.0.0
+
+# Optional: Metrics visualization
+matplotlib>=3.7.0
+
+# Optional: Enhanced CLI table formatting
+tabulate>=0.9.0
+

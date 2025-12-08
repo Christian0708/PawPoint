@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Union, Callable
 from enum import Enum, auto
 import hashlib
-from network_manager import NetworkManager
+from network_manager import NetworkManager, MessageType
 
 class TransferStatus(Enum):
     PENDING = auto()
@@ -46,7 +46,8 @@ class StorageVirtualNode(threading.Thread):
         bandwidth: int,  # in Mbps
         host: str = "localhost",
         port: int = 5000,
-        enable_network_check: bool = True  # Enable network checking on boot
+        enable_network_check: bool = True,  # Enable network checking on boot
+        storage_root: Optional[str] = None
     ):
         # Initialize thread
         super().__init__(name=f"Node-{node_id}", daemon=True)
@@ -60,6 +61,8 @@ class StorageVirtualNode(threading.Thread):
         # Network configuration
         self.host = host
         self.port = port
+        self.ip_address = self._get_ip_address(host)
+        self.mac_address = self._get_mac_address()
         
         # Current utilization
         self.used_storage = 0
@@ -90,8 +93,14 @@ class StorageVirtualNode(threading.Thread):
         # Shutdown callbacks
         self.shutdown_callbacks: List[Callable[[], None]] = []
         
+        # Persist configured storage root
+        self.storage_root = storage_root
+
         # Network manager for real network communication
         self.network_manager = NetworkManager(node_id, host, port)
+        self.network_manager.on_chunk_received = self._on_chunk_received
+        self.network_manager.on_chunk_request = self._on_chunk_request
+        self.network_manager.on_shutdown_requested = self._on_shutdown_request
         
         # Network service configuration
         self.discovery_port = 9999  # Default discovery port
@@ -102,10 +111,10 @@ class StorageVirtualNode(threading.Thread):
         
         # Network listener thread (will be started separately)
         self.listener_thread: Optional[threading.Thread] = None
-        
+
         # Thread pool for asynchronous file transfer processing
         self.transfer_executor: Optional[ThreadPoolExecutor] = None
-        self.max_concurrent_transfers = 10  # Maximum concurrent transfers
+        self.max_concurrent_transfers = max(1, int(cpu_capacity))
         self.active_transfer_futures: Dict[str, Future] = {}  # Track transfer futures
         
         # Create storage directory structure
@@ -114,10 +123,45 @@ class StorageVirtualNode(threading.Thread):
         # Set up signal handlers for graceful shutdown
         self._setup_signal_handlers()
 
+    def _get_ip_address(self, host: str) -> str:
+        """Get IP address for the given host"""
+        try:
+            if host == "localhost" or host == "127.0.0.1":
+                # Get local machine's IP address
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    # Connect to a remote address (doesn't actually send data)
+                    s.connect(('8.8.8.8', 80))
+                    ip = s.getsockname()[0]
+                except Exception:
+                    ip = "127.0.0.1"
+                finally:
+                    s.close()
+                return ip
+            else:
+                # Resolve hostname to IP
+                return socket.gethostbyname(host)
+        except Exception:
+            return host  # Return host as-is if resolution fails
+
+    def _get_mac_address(self) -> str:
+        """Get MAC address of the network interface"""
+        try:
+            import uuid
+            # Get MAC address as hex string
+            mac = uuid.getnode()
+            # Format as XX:XX:XX:XX:XX:XX
+            mac_str = ':'.join(['{:02x}'.format((mac >> elements) & 0xff) 
+                               for elements in range(0, 8*6, 8)][::-1])
+            return mac_str
+        except Exception:
+            return "00:00:00:00:00:00"  # Default MAC if unable to get
+
     def create_storage_structure(self):
         """Create directory structure for node storage on the host machine"""
         # Define storage paths
-        base_path = os.path.join("storage", self.node_id)
+        base_root = self.storage_root if hasattr(self, 'storage_root') and self.storage_root else os.path.abspath("storage")
+        base_path = os.path.join(base_root, self.node_id)
         chunks_path = os.path.join(base_path, "chunks")
         
         # Create directories if they don't exist
@@ -206,6 +250,9 @@ class StorageVirtualNode(threading.Thread):
                         print(f"[{self.node_id}] Connected to cloud network")
                 
                 # Node autonomous operations will be added here
+                # Send heartbeat if connected
+                if self.network_connected:
+                    self._send_heartbeat()
                 # Check stop condition periodically
                 self.stop_event.wait(timeout=1.0)  # Check every second
             except Exception as e:
@@ -217,6 +264,14 @@ class StorageVirtualNode(threading.Thread):
             print(f"[{self.node_id}] Node thread stopping due to shutdown request")
         else:
             print(f"[{self.node_id}] Node thread stopped")
+
+    def _on_shutdown_request(self, reason: str = ""):
+        try:
+            print(f"[{self.node_id}] Remote shutdown requested: {reason}")
+            # Initiate graceful shutdown
+            self.stop(graceful=True, timeout=5.0)
+        except Exception as e:
+            print(f"[{self.node_id}] Error during remote shutdown: {e}")
     
     def _check_and_connect_to_network(self) -> bool:
         """
@@ -309,6 +364,15 @@ class StorageVirtualNode(threading.Thread):
                 if response.get('type') == 'REGISTRATION_CONFIRMED':
                     self.network_connected = True
                     print(f"[{self.node_id}] Successfully registered with network")
+                    # Populate known addresses from handshake
+                    nodes_info = response.get('nodes', {})
+                    if isinstance(nodes_info, dict):
+                        for nid, info in nodes_info.items():
+                            if nid != self.node_id:
+                                host = info.get('host', 'localhost')
+                                port = info.get('port')
+                                if host and port:
+                                    self.network_manager.node_addresses[nid] = (host, int(port))
                     reg_socket.close()
                     return True
             except socket.timeout:
@@ -321,6 +385,22 @@ class StorageVirtualNode(threading.Thread):
         except Exception as e:
             print(f"[{self.node_id}] Error registering with network: {e}")
             return False
+
+    def _send_heartbeat(self):
+        try:
+            hb_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            hb_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            msg = {
+                'type': 'NODE_HEARTBEAT',
+                'node_id': self.node_id,
+                'host': self.host,
+                'port': self.port,
+                'timestamp': time.time()
+            }
+            hb_socket.sendto(json.dumps(msg).encode('utf-8'), ('255.255.255.255', self.discovery_port))
+            hb_socket.close()
+        except Exception:
+            pass
     
     def register_shutdown_callback(self, callback: Callable[[], None]):
         """
@@ -417,6 +497,20 @@ class StorageVirtualNode(threading.Thread):
                 print(f"[{self.node_id}] Network manager stopped")
             except Exception as e:
                 print(f"[{self.node_id}] Error stopping network manager: {e}")
+        # Unregister from network service immediately
+        try:
+            reg_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            reg_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            msg = {
+                'type': 'NODE_UNREGISTER',
+                'node_id': self.node_id,
+                'host': self.host,
+                'port': self.port
+            }
+            reg_socket.sendto(json.dumps(msg).encode('utf-8'), ('255.255.255.255', self.discovery_port))
+            reg_socket.close()
+        except Exception:
+            pass
         
         # Wait for listener thread to finish
         if self.listener_thread and self.listener_thread.is_alive():
@@ -446,6 +540,14 @@ class StorageVirtualNode(threading.Thread):
     def write_chunk_to_disk(self, file_id: str, chunk_id: int, data: bytes) -> tuple[bool, str]:
         """Write a chunk to disk as a binary file and return checksum"""
         try:
+            # Check if we have enough storage space before writing
+            with self.storage_lock:
+                actual_usage = self.get_actual_disk_usage()
+                chunk_size = len(data)
+                if actual_usage + chunk_size > self.total_storage:
+                    print(f"[{self.node_id}] Insufficient storage for chunk {chunk_id}: need {chunk_size} bytes, available {self.total_storage - actual_usage} bytes")
+                    return False, ""
+            
             # Create filename for this chunk
             chunk_filename = f"{file_id}_chunk_{chunk_id}.bin"
             chunk_path = os.path.join(self.chunks_path, chunk_filename)
@@ -458,10 +560,55 @@ class StorageVirtualNode(threading.Thread):
                 f.write(data)
             
             print(f"[{self.node_id}] Wrote chunk {chunk_id} to {chunk_filename} ({len(data)} bytes, checksum: {checksum[:8]}...)")
+            with self.metrics_lock:
+                self.total_data_transferred += len(data)
+            self.sync_storage_metrics()
             return True, checksum
+        except OSError as e:
+            # Handle disk full errors specifically
+            if "No space left" in str(e) or "not enough space" in str(e).lower():
+                print(f"[{self.node_id}] Disk full: Cannot write chunk {chunk_id} ({len(data)} bytes)")
+                with self.storage_lock:
+                    actual_usage = self.get_actual_disk_usage()
+                    print(f"[{self.node_id}] Current usage: {actual_usage}/{self.total_storage} bytes ({actual_usage/self.total_storage*100:.1f}%)")
+            else:
+                print(f"[{self.node_id}] Error writing chunk {chunk_id}: {e}")
+            return False, ""
         except Exception as e:
             print(f"[{self.node_id}] Error writing chunk {chunk_id}: {e}")
             return False, ""
+
+    def send_chunk_to_node(self, target_node_id: str, file_id: str, chunk_id: int) -> bool:
+        try:
+            data = self.read_chunk_from_disk(file_id, chunk_id)
+            if data is None:
+                return False
+            checksum = hashlib.md5(data).hexdigest()
+            return self.network_manager.send_chunk_data(target_node_id, file_id, chunk_id, data, checksum)
+        except Exception:
+            return False
+
+    def _on_chunk_received(self, file_id: str, chunk_id: int, data: bytes, checksum: Optional[str]) -> None:
+        try:
+            if checksum:
+                actual = hashlib.md5(data).hexdigest()
+                if actual != checksum:
+                    print(f"[{self.node_id}] Received chunk checksum mismatch for {file_id}:{chunk_id}")
+                    return
+            success, cs = self.write_chunk_to_disk(file_id, chunk_id, data)
+            if success:
+                with self.metrics_lock:
+                    self.total_data_transferred += len(data)
+        except Exception as e:
+            print(f"[{self.node_id}] Error handling received chunk: {e}")
+
+    def _on_chunk_request(self, file_id: str, chunk_id: int) -> Optional[bytes]:
+        """Handle chunk request (for downloads) - returns chunk data if found"""
+        try:
+            return self.read_chunk_from_disk(file_id, chunk_id)
+        except Exception as e:
+            print(f"[{self.node_id}] Error handling chunk request for {file_id}:{chunk_id}: {e}")
+            return None
 
     def read_chunk_from_disk(self, file_id: str, chunk_id: int, expected_checksum: Optional[str] = None) -> Optional[bytes]:
         """Read a chunk from disk and verify checksum if provided"""
@@ -493,6 +640,33 @@ class StorageVirtualNode(threading.Thread):
         except Exception as e:
             print(f"[{self.node_id}] Error reading chunk {chunk_id}: {e}")
             return None
+
+    def delete_file_by_id(self, file_id: str) -> int:
+        """Delete all chunk files belonging to a file_id and return total bytes removed"""
+        removed_bytes = 0
+        try:
+            for filename in os.listdir(self.chunks_path):
+                if filename.startswith(f"{file_id}_chunk_") and filename.endswith('.bin'):
+                    file_path = os.path.join(self.chunks_path, filename)
+                    if os.path.isfile(file_path):
+                        try:
+                            size = os.path.getsize(file_path)
+                        except Exception:
+                            size = 0
+                        try:
+                            os.remove(file_path)
+                            removed_bytes += size
+                            print(f"[{self.node_id}] Deleted chunk file {filename} ({size} bytes)")
+                        except Exception as e:
+                            print(f"[{self.node_id}] Error deleting {filename}: {e}")
+            with self.storage_lock:
+                self.sync_storage_metrics()
+                if file_id in self.stored_files:
+                    del self.stored_files[file_id]
+            return removed_bytes
+        except Exception as e:
+            print(f"[{self.node_id}] Error deleting file {file_id}: {e}")
+            return removed_bytes
 
     def get_actual_disk_usage(self) -> int:
         """Calculate actual disk space used by reading file sizes from disk"""
@@ -776,6 +950,74 @@ class StorageVirtualNode(threading.Thread):
         
         print(f"[{self.node_id}] Successfully retrieved all chunks for {file_transfer.file_name}")
         return new_transfer
+
+    def store_local_file(self, file_path: str, file_id: Optional[str] = None, source_node: Optional[str] = None) -> Optional[FileTransfer]:
+        try:
+            if not os.path.exists(file_path):
+                return None
+            file_name = os.path.basename(file_path)
+            file_size = os.path.getsize(file_path)
+            if not file_id:
+                file_id = hashlib.md5(f"{file_name}-{time.time()}".encode()).hexdigest()
+            transfer = self.initiate_file_transfer(file_id, file_name, file_size, source_node)
+            if not transfer:
+                return None
+            with open(file_path, 'rb') as f:
+                for chunk in transfer.chunks:
+                    data = f.read(chunk.size)
+                    success, checksum = self.write_chunk_to_disk(file_id, chunk.chunk_id, data)
+                    if not success:
+                        with self.transfer_lock:
+                            self.failed_transfers += 1
+                        return None
+                    chunk.checksum = checksum
+                    chunk.status = TransferStatus.COMPLETED
+                    chunk.stored_node = self.node_id
+                    with self.metrics_lock:
+                        self.total_data_transferred += chunk.size
+            transfer.status = TransferStatus.COMPLETED
+            transfer.completed_at = time.time()
+            with self.storage_lock:
+                self.stored_files[file_id] = transfer
+            with self.transfer_lock:
+                if file_id in self.active_transfers:
+                    del self.active_transfers[file_id]
+            with self.metrics_lock:
+                self.total_requests_processed += 1
+            self.sync_storage_metrics()
+            return transfer
+        except Exception:
+            return None
+
+    def export_file_to_path(self, file_id: str, destination_path: str) -> bool:
+        try:
+            with self.storage_lock:
+                transfer = self.stored_files.get(file_id)
+            if transfer:
+                with open(destination_path, 'wb') as out:
+                    for chunk in transfer.chunks:
+                        data = self.read_chunk_from_disk(file_id, chunk.chunk_id, chunk.checksum)
+                        if data is None:
+                            return False
+                        out.write(data)
+                return True
+            chunk_files = [f for f in os.listdir(self.chunks_path) if f.startswith(f"{file_id}_chunk_")]
+            if not chunk_files:
+                return False
+            def _chunk_index(name: str) -> int:
+                try:
+                    return int(name.split("_chunk_")[-1].split(".bin")[0])
+                except Exception:
+                    return 0
+            chunk_files.sort(key=_chunk_index)
+            with open(destination_path, 'wb') as out:
+                for fname in chunk_files:
+                    fpath = os.path.join(self.chunks_path, fname)
+                    with open(fpath, 'rb') as cfile:
+                        out.write(cfile.read())
+            return True
+        except Exception:
+            return False
 
     def get_storage_utilization(self) -> Dict[str, Union[int, float, List[str]]]:
         """Get current storage utilization metrics using actual disk usage (thread-safe)"""

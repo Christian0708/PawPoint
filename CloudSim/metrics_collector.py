@@ -60,6 +60,7 @@ class TransferMetrics:
     target_node: str
     file_size_bytes: int
     start_time: datetime
+    user_id: Optional[str] = None  # Track which user performed the transfer
     end_time: Optional[datetime] = None
     duration_seconds: Optional[float] = None
     throughput_mbps: Optional[float] = None
@@ -77,6 +78,7 @@ class TransferMetrics:
             "source_node": self.source_node,
             "target_node": self.target_node,
             "file_size_bytes": self.file_size_bytes,
+            "user_id": self.user_id,
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "duration_seconds": self.duration_seconds,
@@ -624,7 +626,8 @@ class MetricsCollector:
         total_throughput = 0.0
         total_latency = 0.0
         total_rtt = 0.0
-        total_storage_util = 0.0
+        total_storage_capacity_bytes = 0
+        total_storage_used_bytes = 0
         total_network_util = 0.0
         total_transfers = 0
         total_successful = 0
@@ -641,15 +644,27 @@ class MetricsCollector:
                 total_throughput += node_metrics.throughput_mbps
                 total_latency += node_metrics.average_latency_ms
                 total_rtt += node_metrics.average_rtt_ms
-                total_storage_util += node_metrics.storage_utilization_percent
                 total_network_util += node_metrics.network_utilization_percent
                 total_transfers += node_metrics.total_transfers
                 total_successful += node_metrics.successful_transfers
                 total_failed += node_metrics.failed_transfers
                 total_data += node_metrics.total_data_transferred_bytes
                 total_active += node_metrics.active_transfers
+                
+                # Get actual storage capacity and used from node
+                node = self.node_factory.get_node(node_id)
+                if node:
+                    try:
+                        storage_util = node.get_storage_utilization()
+                        total_storage_capacity_bytes += storage_util.get('total_bytes', 0)
+                        total_storage_used_bytes += storage_util.get('used_bytes', 0)
+                    except Exception:
+                        pass
         
         node_count = len(node_metrics_list)
+        
+        # Calculate storage utilization correctly: total used / total capacity * 100
+        total_storage_utilization_percent = (total_storage_used_bytes / total_storage_capacity_bytes * 100) if total_storage_capacity_bytes > 0 else 0.0
         
         # Calculate averages
         network_metrics = NetworkMetrics(
@@ -658,7 +673,7 @@ class MetricsCollector:
             total_throughput_mbps=total_throughput,
             average_latency_ms=total_latency / node_count if node_count > 0 else 0.0,
             average_rtt_ms=total_rtt / node_count if node_count > 0 else 0.0,
-            total_storage_utilization_percent=total_storage_util / node_count if node_count > 0 else 0.0,
+            total_storage_utilization_percent=total_storage_utilization_percent,
             total_network_utilization_percent=total_network_util / node_count if node_count > 0 else 0.0,
             total_transfers=total_transfers,
             total_successful_transfers=total_successful,
@@ -682,7 +697,8 @@ class MetricsCollector:
         source_node: str,
         target_node: str,
         file_size_bytes: int,
-        total_chunks: int
+        total_chunks: int,
+        user_id: Optional[str] = None
     ):
         """
         Record the start of a file transfer
@@ -712,7 +728,8 @@ class MetricsCollector:
                 target_node=target_node,
                 file_size_bytes=file_size_bytes,
                 start_time=start_time,
-                total_chunks=total_chunks
+                total_chunks=total_chunks,
+                user_id=user_id
             )
         except Exception as e:
             print(f"Error creating TransferMetrics: {e}")
@@ -764,7 +781,14 @@ class MetricsCollector:
                 if average_chunk_rtt_ms is not None:
                     # Calculate throughput if we have duration and size
                     if transfer.duration_seconds and transfer.duration_seconds > 0:
+                        # Throughput in Mbps: (bytes * 8 bits/byte) / (seconds * 1,000,000 bits/Mbps)
                         transfer.throughput_mbps = (transfer.file_size_bytes * 8) / (transfer.duration_seconds * 1000000)
+                # If throughput wasn't set above but we have duration, calculate it
+                if transfer.throughput_mbps is None and transfer.duration_seconds and transfer.duration_seconds > 0:
+                    transfer.throughput_mbps = (transfer.file_size_bytes * 8) / (transfer.duration_seconds * 1000000)
+                # If latency wasn't set but we have duration, use it as latency
+                if transfer.latency_ms is None and transfer.duration_seconds:
+                    transfer.latency_ms = transfer.duration_seconds * 1000  # Convert seconds to ms
         except Exception as e:
             print(f"Error recording transfer end for {transfer_id}: {e}")
             import traceback
@@ -972,6 +996,230 @@ class MetricsCollector:
             except Exception as e:
                 print(f"[MetricsCollector] Error in collection loop: {e}")
                 time.sleep(self.collection_interval)
+    
+    def get_recent_transfers(self, limit: int = 50, aggregate_by_file: bool = True) -> List[Dict]:
+        """
+        Get recent transfer history with user information
+        
+        Args:
+            limit: Maximum number of file-level transfers to return
+            aggregate_by_file: If True, aggregate chunks by file_id; if False, return individual chunks
+            
+        Returns:
+            List of transfer dictionaries with user_id, file_size_bytes, latency_ms, throughput_mbps
+            If aggregate_by_file=True, includes 'chunks' array with chunk-level details
+        """
+        with self.collection_lock:
+            transfers = list(self.transfer_metrics.values())
+        
+        # Filter out transfers that don't have end_time (incomplete transfers)
+        completed_transfers = [t for t in transfers if t.end_time is not None]
+        
+        print(f"[get_recent_transfers] Total transfers: {len(transfers)}, Completed: {len(completed_transfers)}")
+        
+        if not aggregate_by_file:
+            # Return individual chunk transfers (old behavior)
+            completed_transfers.sort(key=lambda t: t.start_time, reverse=True)
+            result = []
+            for transfer in completed_transfers[:limit]:
+                try:
+                    transfer_dict = transfer.to_dict()
+                    latency = transfer_dict.get("latency_ms")
+                    throughput = transfer_dict.get("throughput_mbps")
+                    
+                    if latency is None and transfer.duration_seconds:
+                        latency = transfer.duration_seconds * 1000
+                    if throughput is None and transfer.duration_seconds and transfer.duration_seconds > 0:
+                        throughput = (transfer.file_size_bytes * 8) / (transfer.duration_seconds * 1000000)
+                    
+                    result.append({
+                        "user_id": transfer_dict.get("user_id") or "N/A",
+                        "file_size_bytes": transfer_dict.get("file_size_bytes", 0),
+                        "file_size_gb": round(transfer_dict.get("file_size_bytes", 0) / (1024**3), 4),
+                        "latency_ms": latency if latency is not None else 0.0,
+                        "throughput_mbps": throughput if throughput is not None else 0.0,
+                        "start_time": transfer_dict.get("start_time"),
+                        "success": transfer_dict.get("success", False),
+                        "source_node": transfer_dict.get("source_node", "N/A"),
+                        "target_node": transfer_dict.get("target_node", "N/A")
+                    })
+                except Exception as e:
+                    print(f"Error processing transfer {transfer.transfer_id}: {e}")
+                    continue
+            return result
+        
+        # Aggregate by file_id
+        file_transfers = {}  # {file_id: {metadata, chunks}}
+        
+        for transfer in completed_transfers:
+            try:
+                file_id = transfer.file_id
+                user_id = transfer.user_id or "N/A"
+                
+                # Create file-level entry if not exists
+                if file_id not in file_transfers:
+                    file_transfers[file_id] = {
+                        "file_id": file_id,
+                        "user_id": user_id,
+                        "total_size_bytes": 0,
+                        "chunks": [],
+                        "start_time": transfer.start_time,
+                        "end_time": transfer.end_time,
+                        "successful_chunks": 0,
+                        "failed_chunks": 0,
+                        "total_latency_ms": 0.0,
+                        "total_throughput_mbps": 0.0,
+                        "chunk_count": 0
+                    }
+                
+                file_transfer = file_transfers[file_id]
+                
+                # Update earliest start time and latest end time
+                if transfer.start_time < file_transfer["start_time"]:
+                    file_transfer["start_time"] = transfer.start_time
+                if transfer.end_time and (file_transfer["end_time"] is None or transfer.end_time > file_transfer["end_time"]):
+                    file_transfer["end_time"] = transfer.end_time
+                
+                # Add chunk details
+                transfer_dict = transfer.to_dict()
+                latency = transfer_dict.get("latency_ms")
+                throughput = transfer_dict.get("throughput_mbps")
+                
+                if latency is None and transfer.duration_seconds:
+                    latency = transfer.duration_seconds * 1000
+                if throughput is None and transfer.duration_seconds and transfer.duration_seconds > 0:
+                    throughput = (transfer.file_size_bytes * 8) / (transfer.duration_seconds * 1000000)
+                
+                chunk_data = {
+                    "chunk_id": transfer.transfer_id,  # Use transfer_id as chunk identifier
+                    "size_bytes": transfer.file_size_bytes,
+                    "latency_ms": latency if latency is not None else 0.0,
+                    "throughput_mbps": throughput if throughput is not None else 0.0,
+                    "success": transfer.success,
+                    "source_node": transfer.source_node,
+                    "target_node": transfer.target_node,
+                    "start_time": transfer.start_time.isoformat() if transfer.start_time else None,
+                    "duration_ms": transfer.duration_seconds * 1000 if transfer.duration_seconds else 0.0
+                }
+                file_transfer["chunks"].append(chunk_data)
+                
+                # Aggregate file-level metrics
+                file_transfer["total_size_bytes"] += transfer.file_size_bytes
+                file_transfer["chunk_count"] += 1
+                if transfer.success:
+                    file_transfer["successful_chunks"] += 1
+                    file_transfer["total_latency_ms"] += (latency if latency is not None else 0.0)
+                    file_transfer["total_throughput_mbps"] += (throughput if throughput is not None else 0.0)
+                else:
+                    file_transfer["failed_chunks"] += 1
+                    
+            except Exception as e:
+                print(f"Error processing transfer {transfer.transfer_id} for aggregation: {e}")
+                continue
+        
+        # Convert to list and calculate averages
+        result = []
+        for file_id, file_data in file_transfers.items():
+            successful_chunks = file_data["successful_chunks"]
+            total_chunks = file_data["chunk_count"]
+            
+            # Calculate average latency and throughput (only from successful chunks)
+            avg_latency = file_data["total_latency_ms"] / successful_chunks if successful_chunks > 0 else 0.0
+            avg_throughput = file_data["total_throughput_mbps"] / successful_chunks if successful_chunks > 0 else 0.0
+            
+            # Overall success (all chunks succeeded)
+            overall_success = file_data["failed_chunks"] == 0
+            
+            result.append({
+                "file_id": file_id,
+                "user_id": file_data["user_id"],
+                "file_size_bytes": file_data["total_size_bytes"],
+                "file_size_gb": round(file_data["total_size_bytes"] / (1024**3), 4),
+                "latency_ms": round(avg_latency, 2),
+                "throughput_mbps": round(avg_throughput, 2),
+                "start_time": file_data["start_time"].isoformat() if hasattr(file_data["start_time"], 'isoformat') else str(file_data["start_time"]),
+                "success": overall_success,
+                "chunk_count": total_chunks,
+                "successful_chunks": successful_chunks,
+                "failed_chunks": file_data["failed_chunks"],
+                "chunks": sorted(file_data["chunks"], key=lambda c: c.get("start_time", ""))  # Sort chunks by start time
+            })
+        
+        # Sort by start_time (most recent first)
+        result.sort(key=lambda x: x.get("start_time", ""), reverse=True)
+        
+        return result[:limit]
+    
+    def get_user_metrics(self, username: Optional[str] = None) -> Dict:
+        """
+        Get metrics aggregated by user
+        
+        Args:
+            username: Optional username to filter by, or None for all users
+            
+        Returns:
+            Dictionary with user metrics
+        """
+        with self.collection_lock:
+            transfers = list(self.transfer_metrics.values())
+        
+        # Filter by user if specified
+        if username:
+            transfers = [t for t in transfers if t.user_id == username]
+        
+        # Aggregate user metrics
+        user_stats = {}
+        for transfer in transfers:
+            if not transfer.user_id:
+                continue
+            
+            user_id = transfer.user_id
+            if user_id not in user_stats:
+                user_stats[user_id] = {
+                    "username": user_id,
+                    "total_transfers": 0,
+                    "successful_transfers": 0,
+                    "failed_transfers": 0,
+                    "total_data_transferred_bytes": 0,
+                    "total_uploads": 0,
+                    "total_downloads": 0,
+                    "upload_data_bytes": 0,
+                    "download_data_bytes": 0
+                }
+            
+            stats = user_stats[user_id]
+            stats["total_transfers"] += 1
+            stats["total_data_transferred_bytes"] += transfer.file_size_bytes
+            
+            if transfer.success:
+                stats["successful_transfers"] += 1
+            else:
+                stats["failed_transfers"] += 1
+            
+            # Determine if upload or download based on source_node
+            if transfer.source_node == "backend_api":
+                stats["total_uploads"] += 1
+                stats["upload_data_bytes"] += transfer.file_size_bytes
+            else:
+                stats["total_downloads"] += 1
+                stats["download_data_bytes"] += transfer.file_size_bytes
+        
+        # Calculate success rates
+        for user_id, stats in user_stats.items():
+            if stats["total_transfers"] > 0:
+                stats["success_rate_percent"] = (stats["successful_transfers"] / stats["total_transfers"]) * 100
+            else:
+                stats["success_rate_percent"] = 0.0
+        
+        if username:
+            return user_stats.get(username, {})
+        else:
+            return {
+                "users": list(user_stats.values()),
+                "total_users": len(user_stats),
+                "total_transfers_all_users": sum(s["total_transfers"] for s in user_stats.values()),
+                "total_data_all_users": sum(s["total_data_transferred_bytes"] for s in user_stats.values())
+            }
     
     def clear_history(self):
         """Clear all metric history"""

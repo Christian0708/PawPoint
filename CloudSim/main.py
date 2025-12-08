@@ -10,6 +10,7 @@ This service:
 """
 
 import time
+import os
 import sys
 import signal
 import io
@@ -32,6 +33,9 @@ class CloudSimService:
     
     def __init__(self, config_path: str = "config.yaml"):
         """Initialize the service"""
+        import os
+        if not os.path.exists(config_path) and os.path.exists(os.path.join(os.path.dirname(__file__), 'config.yaml')):
+            config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
         self.config_path = config_path
         self.config: ConfigLoader = None
         self.factory: NodeFactory = None
@@ -43,6 +47,7 @@ class CloudSimService:
     
     def initialize(self):
         """Initialize all system components"""
+        import os
         print("="*80)
         print("CloudSim Distributed Storage System - Service")
         print("="*80)
@@ -64,7 +69,9 @@ class CloudSimService:
         print("[2/6] Initializing node factory...")
         start_port = self.config.get("node_factory.start_port", 5000)
         port_range = self.config.get("node_factory.port_range_size", 1000)
-        self.factory = NodeFactory(start_port=start_port, port_range_size=port_range)
+        storage_root = os.path.abspath(self.config.get("storage.base_directory", "storage"))
+        state_file = self.config.get("nodes_state_file", "nodes_state.json")
+        self.factory = NodeFactory(start_port=start_port, port_range_size=port_range, state_file=state_file, storage_base_dir=storage_root)
         print(f"[OK] NodeFactory initialized (loaded {len(self.factory.get_all_nodes())} node(s) from state)")
         print()
         
@@ -96,10 +103,12 @@ class CloudSimService:
         discovery_port = self.config.get("network.discovery.port", 9999)
         broadcast_interval = self.config.get("network.discovery.broadcast_interval_seconds", 30.0)
         network_name = self.config.get("network.name", "CloudSim_Storage_Network")
+        node_timeout = self.config.get("network.discovery.node_timeout_seconds", 90.0)
         self.network_service = NetworkService(
             discovery_port=discovery_port,
             broadcast_interval=broadcast_interval,
-            network_name=network_name
+            network_name=network_name,
+            node_timeout=node_timeout
         )
         print("[OK] NetworkService initialized")
         print()
@@ -121,17 +130,16 @@ class CloudSimService:
         
         self.running = True
         
-        # Start existing nodes
+        # Do not auto-start nodes; leave control to CLI
         existing_nodes = self.factory.get_all_nodes()
         if existing_nodes:
-            print(f"Starting {len(existing_nodes)} existing node(s)...")
-            self.factory.start_all_nodes()
-            print(f"[OK] Started {len(existing_nodes)} node(s)")
-            # Wait for nodes to initialize
-            time.sleep(2)
+            print(f"[INFO] {len(existing_nodes)} node(s) present. Nodes are NOT auto-started.")
+            print("       Use CLI to start/stop nodes at will:")
+            print("       - python cli.py start [node_ids]")
+            print("       - python cli.py stop [node_ids]")
         else:
-            print("[INFO] No nodes found. Create nodes using CLI:")
-            print("  python cli.py create --node-id node1 --cpu 4 --memory 8 --storage 50 --bandwidth 500 --start")
+            print("[INFO] No nodes found. Use CLI to create and start nodes:")
+            print("       python cli.py create --node-id node1 --cpu 4 --memory 8 --storage 50 --bandwidth 500")
         print()
         
         # Start metrics collection
@@ -210,6 +218,7 @@ class CloudSimService:
     
     def run(self):
         """Run the service (keeps process alive)"""
+        import os
         # Set up signal handlers for graceful shutdown
         def signal_handler(sig, frame):
             self.stop()
@@ -220,12 +229,23 @@ class CloudSimService:
         
         # Keep process alive
         try:
+            last_mtime = None
+            state_file = self.config.get("nodes_state_file", "nodes_state.json")
             while self.running:
                 time.sleep(1)
                 # Check if network service is still running
                 if self.network_service and not self.network_service.running:
                     print("[WARNING] Network service stopped unexpectedly")
                     break
+                # Detect node state changes (do not auto-start nodes)
+                try:
+                    if os.path.exists(state_file):
+                        mtime = os.path.getmtime(state_file)
+                        if last_mtime is None or mtime > last_mtime:
+                            last_mtime = mtime
+                            self.factory.load_state_incremental()
+                except Exception:
+                    pass
         except KeyboardInterrupt:
             signal_handler(None, None)
 
