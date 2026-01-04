@@ -227,7 +227,7 @@ storage:
    - Open your browser and go to `http://127.0.0.1:8000`
    - You'll see the Client Portal where you can register and upload files
 
-![Quick Start Screenshot](insert-screenshot-link-here)
+![Quick Start Screenshot] (![alt text](/screenshots/image.png))
 *The Client Portal welcome screen after starting all services*
 
 ## Usage
@@ -282,7 +282,7 @@ Once all services are running:
 - **Client Portal**: Open `http://127.0.0.1:8000` in your browser (defaults to client portal)
 - **Provider Portal**: Navigate to `http://127.0.0.1:8000` and use the provider interface
 
-![Web Portal Screenshot](![alt text](/screenshots/image2.png ![alt text](/screenshots/image3.png)))
+![Web Portal Screenshot](![alt text](/screenshots/image2.png) ![alt text](/screenshots/image3.png))
 *The dual-portal interface showing both client and provider views*
 
 ## For End Users (Clients)
@@ -298,7 +298,7 @@ Once all services are running:
 4. Click "Create Account"
 5. You'll automatically receive **1GB of free storage** (this can be increased by administrators)
 
-![Registration Screenshot](![alt text](/screenshots/image.png))
+![Registration Screenshot](![alt text](/screenshots/image9.png))
 *The user registration form with free tier information*
 
 ### Logging In
