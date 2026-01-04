@@ -282,7 +282,7 @@ Once all services are running:
 - **Client Portal**: Open `http://127.0.0.1:8000` in your browser (defaults to client portal)
 - **Provider Portal**: Navigate to `http://127.0.0.1:8000` and use the provider interface
 
-![Web Portal Screenshot](insert-screenshot-link-here)
+![Web Portal Screenshot](![alt text](/screenshots/image2.png ![alt text](/screenshots/image3.png)))
 *The dual-portal interface showing both client and provider views*
 
 ## For End Users (Clients)
@@ -298,7 +298,7 @@ Once all services are running:
 4. Click "Create Account"
 5. You'll automatically receive **1GB of free storage** (this can be increased by administrators)
 
-![Registration Screenshot](insert-screenshot-link-here)
+![Registration Screenshot](![alt text](/screenshots/image.png))
 *The user registration form with free tier information*
 
 ### Logging In
@@ -331,8 +331,10 @@ Once all services are running:
 - Multiple copies of each chunk are created (default: 3 copies)
 - The system tracks where each chunk is stored
 
-![Upload Process Screenshot](insert-screenshot-link-here)
+![Upload Process Screenshot](![alt text](/screenshots/image4.png))
+![Chunk distribution showed on provider portal](![alt text](/screenshots/image5.png))
 *File upload in progress showing chunk distribution*
+
 
 ### Viewing Your Files
 
@@ -390,7 +392,7 @@ The dashboard shows:
 - **Network Status**: Whether the discovery network is running
 - **Node Count**: Number of nodes and their status
 
-![Provider Dashboard Screenshot](insert-screenshot-link-here)
+![Provider Dashboard Screenshot](![alt text](/screenshots/image6.png))
 *The provider dashboard showing system overview*
 
 ### Managing Storage Nodes
@@ -440,7 +442,7 @@ Click "Details" on any node to see:
 - **Current Usage**: Storage utilization, number of files stored
 - **Network Information**: Host, port, network registration status
 
-![Node Details Screenshot](insert-screenshot-link-here)
+![Node Details Screenshot](![alt text](/screenshots/image7.png))
 *Detailed node information panel*
 
 #### Deleting Nodes
@@ -512,7 +514,7 @@ Shows recent file transfers with:
 - Click on any file transfer row to see individual chunk transfer details
 - This shows how chunks were distributed across nodes
 
-![Metrics Dashboard Screenshot](insert-screenshot-link-here)
+![Metrics Dashboard Screenshot](![alt text](/screenshots/image8.png))
 *Comprehensive metrics dashboard with storage, nodes, and transfer history*
 
 ### Network Management
@@ -1620,9 +1622,6 @@ Contributions are welcome! Please follow these guidelines:
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
